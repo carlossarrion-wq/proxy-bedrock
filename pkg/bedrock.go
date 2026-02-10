@@ -64,9 +64,9 @@ type ThinkingConfig struct {
 func ParseMappingsFromStr(raw string) map[string]string {
 	mappings := map[string]string{}
 	pairs := strings.Split(raw, ",")
-	// 遍历每个键值对
+	// Iterate over each key-value pair
 	for _, pair := range pairs {
-		// 以等号分割键和值
+		// Split key and value by equals sign
 		kv := strings.Split(pair, "=")
 		if len(kv) == 2 {
 			key := strings.TrimSpace(kv[0])
@@ -271,12 +271,19 @@ func (this *BedrockClient) GetMergedModelList() ([]ModelInfo, error) {
 	// Get validation results
 	validationResults, err := this.ValidateModelMappings()
 	if err != nil {
-		Log.Errorf("Failed to validate model mappings: %v", err)
+		if this.config.DEBUG {
+			Logger.Error(amslog.Event{
+				Name:    "MODEL_VALIDATION_ERROR",
+				Message: "Failed to validate model mappings",
+				Error: &amslog.ErrorInfo{
+					Type:    "ValidationError",
+					Message: err.Error(),
+				},
+			})
+		}
 		// Fall back to config-only models
 		return this.ListModels(), nil
 	}
-
-	Log.Debugf("Validation results: %v", validationResults)
 
 	// Create model list from validation results
 	var models []ModelInfo
@@ -293,41 +300,65 @@ func (this *BedrockClient) GetMergedModelList() ([]ModelInfo, error) {
 				Version: version,
 				ID:      result.ConfigModel,
 			})
-		} else {
-			Log.Warningf("Model %s (mapped to %s) is not available in Bedrock", result.ConfigModel, result.BedrockModelId)
+		} else if this.config.DEBUG {
+			Logger.Warning(amslog.Event{
+				Name:    "MODEL_NOT_AVAILABLE",
+				Message: "Model not available in Bedrock",
+				Fields: map[string]interface{}{
+					"config_model":    result.ConfigModel,
+					"bedrock_model_id": result.BedrockModelId,
+				},
+			})
 		}
 	}
 
 	// If no valid models found, fall back to config models
 	if len(models) == 0 {
-		Log.Warning("No valid models found from Bedrock API, falling back to config models")
+		if this.config.DEBUG {
+			Logger.Warning(amslog.Event{
+				Name:    "NO_VALID_MODELS",
+				Message: "No valid models found from Bedrock API, falling back to config models",
+			})
+		}
 		return this.ListModels(), nil
 	}
 
 	return models, nil
 }
 
-// 自定义的 RoundTripper 用于记录请求和响应
+// Custom RoundTripper for logging requests and responses
 type loggingRoundTripper struct {
 	wrapped http.RoundTripper
 }
 
 func (l loggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	// 记录请求
+	// Log request (DEBUG mode only)
 	reqDump, _ := httputil.DumpRequestOut(req, true)
-	Log.Infof("Request:\n%s", string(reqDump))
+	Logger.Debug(amslog.Event{
+		Name:    "HTTP_REQUEST_DUMP",
+		Message: "HTTP request details",
+		Fields: map[string]interface{}{
+			"request": string(reqDump),
+		},
+	})
 
-	// 发送请求
+	// Send request
 	resp, err := l.wrapped.RoundTrip(req)
 	if err != nil {
 		return nil, err
 	}
 
-	// 记录响应
+	// Log response (DEBUG mode only)
 	respDump, _ := httputil.DumpResponse(resp, true)
-	Log.Infof("Response:\n%s", string(respDump))
+	Logger.Debug(amslog.Event{
+		Name:    "HTTP_RESPONSE_DUMP",
+		Message: "HTTP response details",
+		Fields: map[string]interface{}{
+			"response": string(respDump),
+		},
+	})
 
-	// 重要：我们需要重新创建响应体，因为 DumpResponse 会消耗它
+	// Important: recreate response body since DumpResponse consumes it
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
@@ -402,14 +433,21 @@ func (this *BedrockClient) SignRequest(request *http.Request, inferenceProfileAR
 		return nil, false, fmt.Errorf("no inference profile ARN provided - user must have default_inference_profile in JWT")
 	}
 
-	Log.Infof("[INFERENCE_PROFILE] Using ARN from JWT: %s", inferenceProfileARN)
+	if this.config.DEBUG {
+		Logger.Debug(amslog.Event{
+			Name:    "INFERENCE_PROFILE_SELECTED",
+			Message: "Using inference profile from JWT",
+			Fields: map[string]interface{}{
+				"profile_arn": inferenceProfileARN,
+			},
+		})
+	}
 
 	if strings.Contains(contentType, "json") {
 		decoder := json.NewDecoder(reader)
 		wrapper := make(map[string]interface{})
 		err := decoder.Decode(&wrapper)
 		if err != nil {
-			Log.Error(err)
 			return request, false, err
 		}
 
@@ -442,14 +480,6 @@ func (this *BedrockClient) SignRequest(request *http.Request, inferenceProfileAR
 		// Apply max_tokens logic: use config value if it exists and is > 0, otherwise keep the incoming value
 		if this.config.MaxTokens > 0 {
 			wrapper["max_tokens"] = this.config.MaxTokens
-			if this.config.DEBUG {
-				Log.Infof("Using max_tokens from config: %d", this.config.MaxTokens)
-			}
-		} else if this.config.DEBUG {
-			// Log the incoming max_tokens value if present
-			if maxTokensValue, ok := wrapper["max_tokens"]; ok {
-				Log.Infof("Using max_tokens from request: %v", maxTokensValue)
-			}
 		}
 
 		newBody, err := json.Marshal(wrapper)
@@ -485,12 +515,9 @@ func (this *BedrockClient) SignRequest(request *http.Request, inferenceProfileAR
 	if isStream {
 		bedrockRuntimeEndPoint = fmt.Sprintf(`https://bedrock-runtime.%s.amazonaws.com/model/%s/invoke-with-response-stream`, this.config.Region, url.QueryEscape(inferenceProfileARN))
 	}
-	
-	Log.Infof("[BEDROCK_ENDPOINT] %s", bedrockRuntimeEndPoint)
 
 	preSignReq, err := http.NewRequest("POST", bedrockRuntimeEndPoint, cloneReq.Body)
 	if err != nil {
-		Log.Error(err)
 		return nil, false, err
 	}
 	preSignReq.Header.Set("Content-Type", contentType)
@@ -498,23 +525,21 @@ func (this *BedrockClient) SignRequest(request *http.Request, inferenceProfileAR
 
 	signer := v4.NewSigner()
 
-	// 获取凭证
+	// Retrieve credentials
 	credentialList, err := cfg.Credentials.Retrieve(context.TODO())
 	if err != nil {
-		Log.Error(err)
 		return nil, false, err
 	}
 
 	hash := sha256.Sum256(bodyBuff.Bytes())
 	payloadHash := hex.EncodeToString(hash[:])
-	// 签名请求
+	// Sign request
 	err = signer.SignHTTP(context.TODO(), credentialList, preSignReq, payloadHash, "bedrock", cfg.Region, time.Now(), func(options *v4.SignerOptions) {
 		if this.config.DEBUG {
 			options.LogSigning = true
 		}
 	})
 	if err != nil {
-		Log.Error(err)
 		return nil, false, err
 	}
 
@@ -549,7 +574,6 @@ func convertSystemBlocksWithCache(systemBlocks []interface{}) []types.SystemCont
 					},
 				}
 				result = append(result, cachePointBlock)
-				Log.Infof("[PROMPT_CACHE] System block marked for caching (length: %d chars)", len(text))
 			}
 		}
 	}
@@ -615,7 +639,6 @@ func convertAnthropicToBedrockMessages(anthropicMessages []interface{}) ([]types
 									},
 								}
 								contentBlocks = append(contentBlocks, cachePointBlock)
-								Log.Infof("[PROMPT_CACHE] Content block marked for caching (length: %d chars)", len(text))
 							}
 						}
 					}
@@ -684,20 +707,15 @@ func (this *BedrockClient) handleBedrockStreamConverse(w http.ResponseWriter, cl
 	for {
 		event, ok := <-stream.Events()
 		if !ok {
-			Log.Infof("[STREAM_DEBUG] Channel closed, no more events")
 			break
 		}
 
 		eventCount++
-		
-		// LOG EXHAUSTIVO: Tipo de evento recibido
-		Log.Infof("[STREAM_DEBUG] Event #%d received, type: %T", eventCount, event)
 
 		switch e := event.(type) {
 		case *types.ConverseStreamOutputMemberMessageStart:
 			// NO enviar message_start aún - esperar a tener tokens reales de Metadata
 			messageStartReceived = true
-			Log.Debug("[BUFFERING] message_start received, waiting for Metadata to send with real tokens")
 
 		case *types.ConverseStreamOutputMemberContentBlockStart:
 			// Enviar evento content_block_start
@@ -717,7 +735,6 @@ func (this *BedrockClient) handleBedrockStreamConverse(w http.ResponseWriter, cl
 					if len(processedText) > 0 {
 						textJSON, err := json.Marshal(processedText)
 						if err != nil {
-							Log.Errorf("[STREAM_ERROR] id=%s Failed to marshal text delta: %v", modelID, err)
 							continue
 						}
 						fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":%s}}\n\n", string(textJSON))
@@ -732,9 +749,7 @@ func (this *BedrockClient) handleBedrockStreamConverse(w http.ResponseWriter, cl
 				remainingText := xmlBuffer.Flush()
 				if len(remainingText) > 0 {
 					textJSON, err := json.Marshal(remainingText)
-					if err != nil {
-						Log.Errorf("[STREAM_ERROR] id=%s Failed to marshal remaining text: %v", modelID, err)
-					} else {
+					if err == nil {
 						fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":%s}}\n\n", string(textJSON))
 						flusher.Flush()
 					}
@@ -769,8 +784,6 @@ func (this *BedrockClient) handleBedrockStreamConverse(w http.ResponseWriter, cl
 						modelID, inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens)
 					flusher.Flush()
 					messageStartSent = true
-					Log.Infof("[BUFFERING] message_start sent with real tokens: input=%d, output=%d, cache_write=%d, cache_read=%d", 
-						inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens)
 				}
 				
 				// Enviar evento ping con tokens reales para MetricsCapture (backup)
@@ -800,7 +813,6 @@ func (this *BedrockClient) handleBedrockStreamConverse(w http.ResponseWriter, cl
 		return fmt.Errorf("stream error: %w", err)
 	}
 
-	Log.Infof("[STREAM_COMPLETE] Total events: %d", eventCount)
 	return nil
 }
 
@@ -1031,59 +1043,15 @@ func (this *BedrockClient) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 		
-		// LOG DETALLADO: Mostrar contenido completo del system prompt con herramientas MCP
-		if len(systemBlocks) > 0 {
-			Logger.InfoContext(ctx, amslog.Event{
+		// LOG solo en modo DEBUG
+		if this.config.DEBUG && len(systemBlocks) > 0 {
+			Logger.DebugContext(ctx, amslog.Event{
 				Name:    "BEDROCK_SYSTEM_PROMPT_DETAIL",
 				Message: "System prompt content being sent to Bedrock",
 				Fields: map[string]interface{}{
 					"total_blocks": len(systemBlocks),
 				},
 			})
-			
-			for i, block := range systemBlocks {
-				if textBlock, ok := block.(*types.SystemContentBlockMemberText); ok {
-					content := textBlock.Value
-					contentLength := len(content)
-					
-					// Mostrar preview del contenido (primeros 500 chars)
-					preview := content
-					if contentLength > 500 {
-						preview = content[:500] + "..."
-					}
-					
-					Logger.InfoContext(ctx, amslog.Event{
-						Name:    "BEDROCK_SYSTEM_BLOCK_CONTENT",
-						Message: fmt.Sprintf("System block #%d content", i+1),
-						Fields: map[string]interface{}{
-							"block_index":     i,
-							"content_length":  contentLength,
-							"content_preview": preview,
-						},
-					})
-					
-					// Si el bloque contiene herramientas MCP (detectar por keywords)
-					if strings.Contains(content, "# Tools") || strings.Contains(content, "Tool Use Formatting") {
-						Logger.InfoContext(ctx, amslog.Event{
-							Name:    "BEDROCK_MCP_TOOLS_DETECTED",
-							Message: "MCP tools detected in system prompt",
-							Fields: map[string]interface{}{
-								"block_index":    i,
-								"full_content":   content, // Contenido completo de las herramientas
-								"content_length": contentLength,
-							},
-						})
-					}
-				} else if _, ok := block.(*types.SystemContentBlockMemberCachePoint); ok {
-					Logger.InfoContext(ctx, amslog.Event{
-						Name:    "BEDROCK_SYSTEM_CACHE_POINT",
-						Message: fmt.Sprintf("Cache point at block #%d", i+1),
-						Fields: map[string]interface{}{
-							"block_index": i,
-						},
-					})
-				}
-			}
 		}
 		
 		// Extraer max_tokens (prioridad: config > payload > default)
@@ -1110,15 +1078,16 @@ func (this *BedrockClient) HandleProxy(w http.ResponseWriter, r *http.Request) {
 
 		// Respetar SIEMPRE el tool_choice que envía el cliente (principio de transparencia)
 		if tc, ok := payload["tool_choice"]; ok {
-			Log.Infof("[DEBUG_TOOL_CHOICE] tool_choice from Anthropic: %+v", tc)
 			toolChoice = convertAnthropicToolChoiceToBedrock(tc)
 			if toolChoice != nil && toolConfig != nil {
 				// Aplicar el ToolChoice del cliente al ToolConfiguration
 				toolConfig.ToolChoice = toolChoice
-				Logger.InfoContext(ctx, amslog.Event{
-					Name:    "BEDROCK_TOOL_CHOICE_APPLIED",
-					Message: "Tool choice from client applied to ToolConfiguration",
-				})
+				if this.config.DEBUG {
+					Logger.DebugContext(ctx, amslog.Event{
+						Name:    "BEDROCK_TOOL_CHOICE_APPLIED",
+						Message: "Tool choice from client applied to ToolConfiguration",
+					})
+				}
 			}
 		} else {
 			// Si no se especifica, usar 'auto' por defecto
@@ -1126,7 +1095,6 @@ func (this *BedrockClient) HandleProxy(w http.ResponseWriter, r *http.Request) {
 				toolConfig.ToolChoice = &types.ToolChoiceMemberAuto{
 					Value: types.AutoToolChoice{},
 				}
-				Log.Infof("[DEBUG_TOOL_CHOICE] No tool_choice specified, using default 'auto'")
 			}
 		}
 
@@ -1304,7 +1272,7 @@ func (this *BedrockClient) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 
-	// 寫入修改後的響應
+	// Write modified response
 	for k, v := range resp.Header {
 		w.Header()[k] = v
 	}
