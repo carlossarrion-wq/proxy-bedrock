@@ -156,23 +156,16 @@ func convertAnthropicToolChoiceToBedrock(toolChoice interface{}) types.ToolChoic
 	return nil
 }
 
-// convertAnthropicToolsToText convierte tools de formato Anthropic a texto descriptivo
-// para incluir en el system prompt (igual que hace Cline)
-func convertAnthropicToolsToText(anthropicTools []interface{}) string {
+// convertAnthropicToolsToJSON convierte tools de formato Anthropic a formato JSON estructurado
+// para incluir en el system prompt (formato Bedrock nativo)
+func convertAnthropicToolsToJSON(anthropicTools []interface{}) (string, error) {
 	if len(anthropicTools) == 0 {
-		return ""
+		return "", nil
 	}
 
-	var toolsText strings.Builder
+	// Crear estructura para las herramientas
+	toolsData := make([]map[string]interface{}, 0, len(anthropicTools))
 	
-	toolsText.WriteString("\n\n# Tool Use Formatting\n\n")
-	toolsText.WriteString("Tool use is formatted using XML-style tags. The tool name is enclosed in opening and closing tags, ")
-	toolsText.WriteString("and each parameter is similarly enclosed within its own set of tags. Here's the structure:\n\n")
-	toolsText.WriteString("<tool_name>\n<parameter1_name>value1</parameter1_name>\n<parameter2_name>value2</parameter2_name>\n")
-	toolsText.WriteString("...\n</tool_name>\n\n")
-	toolsText.WriteString("Always adhere to this format for tool use to ensure proper parsing and execution.\n\n")
-	toolsText.WriteString("# Tools\n\n")
-
 	for _, tool := range anthropicTools {
 		toolMap, ok := tool.(map[string]interface{})
 		if !ok {
@@ -181,70 +174,37 @@ func convertAnthropicToolsToText(anthropicTools []interface{}) string {
 
 		name, _ := toolMap["name"].(string)
 		description, _ := toolMap["description"].(string)
+		inputSchema, _ := toolMap["input_schema"].(map[string]interface{})
 
 		if name == "" {
 			continue
 		}
 
-		// Escribir nombre y descripción de la tool
-		toolsText.WriteString(fmt.Sprintf("## %s\n", name))
-		if description != "" {
-			toolsText.WriteString(fmt.Sprintf("Description: %s\n", description))
-		}
-
-		// Procesar input_schema para extraer parámetros
-		if inputSchema, ok := toolMap["input_schema"].(map[string]interface{}); ok {
-			if properties, ok := inputSchema["properties"].(map[string]interface{}); ok {
-				required := []string{}
-				if req, ok := inputSchema["required"].([]interface{}); ok {
-					for _, r := range req {
-						if reqStr, ok := r.(string); ok {
-							required = append(required, reqStr)
-						}
-					}
-				}
-
-				toolsText.WriteString("Parameters:\n")
-				for paramName, paramValue := range properties {
-					paramMap, ok := paramValue.(map[string]interface{})
-					if !ok {
-						continue
-					}
-
-					isRequired := false
-					for _, req := range required {
-						if req == paramName {
-							isRequired = true
-							break
-						}
-					}
-
-					reqStr := "optional"
-					if isRequired {
-						reqStr = "required"
-					}
-
-					paramDesc, _ := paramMap["description"].(string)
-					toolsText.WriteString(fmt.Sprintf("- %s: (%s) %s\n", paramName, reqStr, paramDesc))
-				}
-			}
-		}
-
-		// Ejemplo de uso
-		toolsText.WriteString("Usage:\n")
-		toolsText.WriteString(fmt.Sprintf("<%s>\n", name))
-		
-		// Añadir parámetros de ejemplo
-		if inputSchema, ok := toolMap["input_schema"].(map[string]interface{}); ok {
-			if properties, ok := inputSchema["properties"].(map[string]interface{}); ok {
-				for paramName := range properties {
-					toolsText.WriteString(fmt.Sprintf("<%s>value here</%s>\n", paramName, paramName))
-				}
-			}
+		// Crear entrada de herramienta con formato estructurado
+		toolEntry := map[string]interface{}{
+			"name":        name,
+			"description": description,
+			"inputSchema": inputSchema,
 		}
 		
-		toolsText.WriteString(fmt.Sprintf("</%s>\n\n", name))
+		toolsData = append(toolsData, toolEntry)
 	}
 
-	return toolsText.String()
+	// Convertir a JSON
+	jsonBytes, err := json.MarshalIndent(toolsData, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal tools to JSON: %w", err)
+	}
+
+	// Crear el texto del system prompt con las herramientas en JSON
+	var result strings.Builder
+	result.WriteString("\n\n# Available MCP Tools\n\n")
+	result.WriteString("The following tools are available as MCP (Model Context Protocol) tools. ")
+	result.WriteString("Each tool has a name, description, and input schema that defines its parameters.\n\n")
+	result.WriteString("```json\n")
+	result.WriteString(string(jsonBytes))
+	result.WriteString("\n```\n\n")
+	result.WriteString("To use a tool, reference it by name and provide parameters according to its input schema.\n")
+
+	return result.String(), nil
 }

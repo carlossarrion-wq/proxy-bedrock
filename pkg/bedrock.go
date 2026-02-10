@@ -940,22 +940,38 @@ func (this *BedrockClient) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		var toolsTextForSystemPrompt string
 		
 		if tools, ok := payload["tools"].([]interface{}); ok {
-			// Convertir tools a texto para añadir al system prompt (igual que Cline)
-			toolsTextForSystemPrompt = convertAnthropicToolsToText(tools)
+			// Convertir tools a JSON estructurado para añadir al system prompt
+			var convErr error
+			toolsTextForSystemPrompt, convErr = convertAnthropicToolsToJSON(tools)
+			
+			if convErr != nil {
+				Logger.ErrorContext(ctx, amslog.Event{
+					Name:    EventProxyRequestError,
+					Message: "Failed to convert tools to JSON",
+					Outcome: amslog.OutcomeFailure,
+					Error: &amslog.ErrorInfo{
+						Type:    "ToolConversionError",
+						Message: convErr.Error(),
+						Code:    "TOOL_JSON_CONVERSION_FAILED",
+					},
+				})
+				w.Header().Set("Content-Type", "application/json")
+				http.Error(w, fmt.Sprintf(`{"error": "Failed to convert tools to JSON: %s"}`, convErr.Error()), http.StatusBadRequest)
+				return
+			}
 			
 			if toolsTextForSystemPrompt != "" {
 				Logger.InfoContext(ctx, amslog.Event{
-					Name:    "BEDROCK_TOOLS_TO_TEXT",
-					Message: "Tools converted to text for system prompt",
+					Name:    "BEDROCK_TOOLS_TO_JSON",
+					Message: "Tools converted to JSON for system prompt",
 					Fields: map[string]interface{}{
 						"tools_count": len(tools),
-						"text_length": len(toolsTextForSystemPrompt),
+						"json_length": len(toolsTextForSystemPrompt),
 					},
 				})
 			}
 			
 			// También convertir a ToolConfiguration (aunque NO se enviará a Bedrock)
-			var err error
 			toolConfig, err = convertAnthropicToolsToBedrock(tools)
 			if err != nil {
 				Logger.ErrorContext(ctx, amslog.Event{
@@ -1013,6 +1029,61 @@ func (this *BedrockClient) HandleProxy(w http.ResponseWriter, r *http.Request) {
 					"tools_added":         toolsTextForSystemPrompt != "",
 				},
 			})
+		}
+		
+		// LOG DETALLADO: Mostrar contenido completo del system prompt con herramientas MCP
+		if len(systemBlocks) > 0 {
+			Logger.InfoContext(ctx, amslog.Event{
+				Name:    "BEDROCK_SYSTEM_PROMPT_DETAIL",
+				Message: "System prompt content being sent to Bedrock",
+				Fields: map[string]interface{}{
+					"total_blocks": len(systemBlocks),
+				},
+			})
+			
+			for i, block := range systemBlocks {
+				if textBlock, ok := block.(*types.SystemContentBlockMemberText); ok {
+					content := textBlock.Value
+					contentLength := len(content)
+					
+					// Mostrar preview del contenido (primeros 500 chars)
+					preview := content
+					if contentLength > 500 {
+						preview = content[:500] + "..."
+					}
+					
+					Logger.InfoContext(ctx, amslog.Event{
+						Name:    "BEDROCK_SYSTEM_BLOCK_CONTENT",
+						Message: fmt.Sprintf("System block #%d content", i+1),
+						Fields: map[string]interface{}{
+							"block_index":     i,
+							"content_length":  contentLength,
+							"content_preview": preview,
+						},
+					})
+					
+					// Si el bloque contiene herramientas MCP (detectar por keywords)
+					if strings.Contains(content, "# Tools") || strings.Contains(content, "Tool Use Formatting") {
+						Logger.InfoContext(ctx, amslog.Event{
+							Name:    "BEDROCK_MCP_TOOLS_DETECTED",
+							Message: "MCP tools detected in system prompt",
+							Fields: map[string]interface{}{
+								"block_index":    i,
+								"full_content":   content, // Contenido completo de las herramientas
+								"content_length": contentLength,
+							},
+						})
+					}
+				} else if _, ok := block.(*types.SystemContentBlockMemberCachePoint); ok {
+					Logger.InfoContext(ctx, amslog.Event{
+						Name:    "BEDROCK_SYSTEM_CACHE_POINT",
+						Message: fmt.Sprintf("Cache point at block #%d", i+1),
+						Fields: map[string]interface{}{
+							"block_index": i,
+						},
+					})
+				}
+			}
 		}
 		
 		// Extraer max_tokens (prioridad: config > payload > default)
