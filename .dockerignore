@@ -1,0 +1,38 @@
+# Git
+.git
+.gitignore
+
+# Documentación
+*.md
+README.md
+
+# Archivos de configuración local
+.env
+.env.local
+.env.example
+
+# Logs
+*.log
+logs/
+
+# Archivos temporales
+*.tmp
+*.swp
+*~
+
+# Directorio de Terraform
+terraform/
+*.tf
+*.tfvars
+*.tfstate
+*.tfstate.backup
+
+# Directorio de Logging Policy (no necesario en imagen)
+Logging Policy/
+
+# Archivos de IDE
+.vscode/
+.idea/
+
+# Archivos de test
+*_test.go

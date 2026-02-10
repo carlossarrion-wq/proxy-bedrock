@@ -1,0 +1,40 @@
+# Binarios
+bedrock-proxy
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Logs
+*.log
+*.log.gz
+proxy-*.log.gz
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
+
+# Archivos de backup
+*.backup
+*.backup-*
+
+# Variables de entorno y scripts con credenciales
+.env
+.env.local
+start-proxy.sh
+*.sh
+
+# Dependencias
+vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Archivos temporales
+*.tmp
+*.temp
+nohup.out
