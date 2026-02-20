@@ -53,6 +53,7 @@ type BedrockConfig struct {
 	EnableOutputReason       bool              `json:"enable_output_reasoning"`
 	ReasonBudgetTokens       int               `json:"reason_budget_tokens"`
 	MaxTokens                int               `json:"max_tokens"`
+	ForcePromptCaching       bool              `json:"force_prompt_caching"`
 	DEBUG                    bool              `json:"debug,omitempty"`
 }
 
@@ -79,6 +80,12 @@ func ParseMappingsFromStr(raw string) map[string]string {
 }
 
 func LoadBedrockConfigWithEnv() *BedrockConfig {
+	// ForcePromptCaching por defecto es true (forzar caching)
+	forcePromptCaching := true
+	if forceCachingStr := os.Getenv("AWS_BEDROCK_FORCE_PROMPT_CACHING"); forceCachingStr != "" {
+		forcePromptCaching = forceCachingStr == "true"
+	}
+	
 	config := &BedrockConfig{
 		AccessKey:                os.Getenv("AWS_BEDROCK_ACCESS_KEY"),
 		SecretKey:                os.Getenv("AWS_BEDROCK_SECRET_KEY"),
@@ -91,6 +98,7 @@ func LoadBedrockConfigWithEnv() *BedrockConfig {
 		EnableOutputReason:       os.Getenv("AWS_BEDROCK_ENABLE_OUTPUT_REASON") == "true",
 		ReasonBudgetTokens:       1024,
 		MaxTokens:                0,
+		ForcePromptCaching:       forcePromptCaching,
 		DEBUG:                    os.Getenv("AWS_BEDROCK_DEBUG") == "true",
 	}
 
@@ -547,10 +555,10 @@ func (this *BedrockClient) SignRequest(request *http.Request, inferenceProfileAR
 }
 
 // convertSystemBlocksWithCache convierte bloques de system de Anthropic a Bedrock con soporte para cache_control
-func convertSystemBlocksWithCache(systemBlocks []interface{}) []types.SystemContentBlock {
+func convertSystemBlocksWithCache(systemBlocks []interface{}, forcePromptCaching bool) []types.SystemContentBlock {
 	var result []types.SystemContentBlock
 	
-	for _, block := range systemBlocks {
+	for i, block := range systemBlocks {
 		blockMap, ok := block.(map[string]interface{})
 		if !ok {
 			continue
@@ -564,17 +572,29 @@ func convertSystemBlocksWithCache(systemBlocks []interface{}) []types.SystemCont
 		}
 		result = append(result, textBlock)
 		
-		// Verificar si tiene cache_control - si sí, añadir cache point DESPUÉS
-		if cacheControl, ok := blockMap["cache_control"].(map[string]interface{}); ok {
-			if cacheType, ok := cacheControl["type"].(string); ok && cacheType == "ephemeral" {
-				// Insertar cache point como bloque separado DESPUÉS del texto
-				cachePointBlock := &types.SystemContentBlockMemberCachePoint{
-					Value: types.CachePointBlock{
-						Type: types.CachePointTypeDefault,
-					},
+		// Determinar si añadir cache point
+		shouldAddCachePoint := false
+		
+		if forcePromptCaching {
+			// Si ForcePromptCaching está activo, añadir cache point al último bloque
+			shouldAddCachePoint = (i == len(systemBlocks)-1)
+		} else {
+			// Si no está forzado, respetar lo que envía el cliente
+			if cacheControl, ok := blockMap["cache_control"].(map[string]interface{}); ok {
+				if cacheType, ok := cacheControl["type"].(string); ok && cacheType == "ephemeral" {
+					shouldAddCachePoint = true
 				}
-				result = append(result, cachePointBlock)
 			}
+		}
+		
+		if shouldAddCachePoint {
+			// Insertar cache point como bloque separado DESPUÉS del texto
+			cachePointBlock := &types.SystemContentBlockMemberCachePoint{
+				Value: types.CachePointBlock{
+					Type: types.CachePointTypeDefault,
+				},
+			}
+			result = append(result, cachePointBlock)
 		}
 	}
 	
@@ -582,10 +602,10 @@ func convertSystemBlocksWithCache(systemBlocks []interface{}) []types.SystemCont
 }
 
 // convertAnthropicToBedrockMessages convierte mensajes de formato Anthropic a formato Bedrock con soporte para cache_control
-func convertAnthropicToBedrockMessages(anthropicMessages []interface{}) ([]types.Message, error) {
+func convertAnthropicToBedrockMessages(anthropicMessages []interface{}, forcePromptCaching bool) ([]types.Message, error) {
 	var bedrockMessages []types.Message
 	
-	for _, msg := range anthropicMessages {
+	for msgIdx, msg := range anthropicMessages {
 		msgMap, ok := msg.(map[string]interface{})
 		if !ok {
 			continue
@@ -613,7 +633,7 @@ func convertAnthropicToBedrockMessages(anthropicMessages []interface{}) ([]types
 			}
 		} else if contentArray, ok := content.([]interface{}); ok {
 			// Content es un array de bloques
-			for _, block := range contentArray {
+			for blockIdx, block := range contentArray {
 				blockMap, ok := block.(map[string]interface{})
 				if !ok {
 					continue
@@ -629,17 +649,31 @@ func convertAnthropicToBedrockMessages(anthropicMessages []interface{}) ([]types
 						}
 						contentBlocks = append(contentBlocks, textBlock)
 						
-						// Verificar si tiene cache_control - si sí, añadir cache point DESPUÉS
-						if cacheControl, ok := blockMap["cache_control"].(map[string]interface{}); ok {
-							if cacheType, ok := cacheControl["type"].(string); ok && cacheType == "ephemeral" {
-								// Insertar cache point como bloque separado DESPUÉS del texto
-								cachePointBlock := &types.ContentBlockMemberCachePoint{
-									Value: types.CachePointBlock{
-										Type: types.CachePointTypeDefault,
-									},
+						// Determinar si añadir cache point
+						shouldAddCachePoint := false
+						
+						if forcePromptCaching {
+							// Si ForcePromptCaching está activo, añadir cache point al último bloque del último mensaje user
+							isLastMessage := (msgIdx == len(anthropicMessages)-1)
+							isLastBlock := (blockIdx == len(contentArray)-1)
+							shouldAddCachePoint = (role == types.ConversationRoleUser && isLastMessage && isLastBlock)
+						} else {
+							// Si no está forzado, respetar lo que envía el cliente
+							if cacheControl, ok := blockMap["cache_control"].(map[string]interface{}); ok {
+								if cacheType, ok := cacheControl["type"].(string); ok && cacheType == "ephemeral" {
+									shouldAddCachePoint = true
 								}
-								contentBlocks = append(contentBlocks, cachePointBlock)
 							}
+						}
+						
+						if shouldAddCachePoint {
+							// Insertar cache point como bloque separado DESPUÉS del texto
+							cachePointBlock := &types.ContentBlockMemberCachePoint{
+								Value: types.CachePointBlock{
+									Type: types.CachePointTypeDefault,
+								},
+							}
+							contentBlocks = append(contentBlocks, cachePointBlock)
 						}
 					}
 				case "image":
@@ -1024,7 +1058,7 @@ func (this *BedrockClient) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			})
 		} else if sysArray, ok := payload["system"].([]interface{}); ok {
 			// System es un array de bloques (con posible cache_control)
-			systemBlocks = convertSystemBlocksWithCache(sysArray)
+			systemBlocks = convertSystemBlocksWithCache(sysArray, this.config.ForcePromptCaching)
 			
 			// Añadir tools al final del system prompt si existen
 			if toolsTextForSystemPrompt != "" {
@@ -1037,8 +1071,9 @@ func (this *BedrockClient) HandleProxy(w http.ResponseWriter, r *http.Request) {
 				Name:    "BEDROCK_PARSE_SYSTEM",
 				Message: "Converted system blocks with cache support",
 				Fields: map[string]interface{}{
-					"system_blocks_count": len(systemBlocks),
-					"tools_added":         toolsTextForSystemPrompt != "",
+					"system_blocks_count":   len(systemBlocks),
+					"tools_added":           toolsTextForSystemPrompt != "",
+					"force_prompt_caching":  this.config.ForcePromptCaching,
 				},
 			})
 		}
@@ -1123,7 +1158,7 @@ func (this *BedrockClient) HandleProxy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			
-			bedrockMessages, err = convertAnthropicToBedrockMessages(messages)
+			bedrockMessages, err = convertAnthropicToBedrockMessages(messages, this.config.ForcePromptCaching)
 			if err != nil {
 				Logger.ErrorContext(ctx, amslog.Event{
 					Name:       EventProxyRequestError,

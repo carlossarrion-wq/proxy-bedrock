@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	
@@ -15,12 +16,27 @@ type JWTConfig struct {
 }
 
 // LoadJWTConfigWithEnv carga configuración JWT desde variables de entorno
-func LoadJWTConfigWithEnv() *JWTConfig {
+// Retorna error si JWT_SECRET_KEY no cumple requisitos de seguridad OWASP
+func LoadJWTConfigWithEnv() (*JWTConfig, error) {
+	secretKey := os.Getenv("JWT_SECRET_KEY")
+	
+	// Validación crítica de seguridad: JWT secret debe existir
+	if secretKey == "" {
+		return nil, fmt.Errorf("JWT_SECRET_KEY environment variable is required")
+	}
+	
+	// Validación crítica de seguridad: JWT secret debe tener al menos 32 caracteres
+	// Esto previene el uso de claves débiles que podrían ser vulnerables a ataques de fuerza bruta
+	// Referencia: OWASP JWT Security Cheat Sheet
+	if len(secretKey) < 32 {
+		return nil, fmt.Errorf("JWT_SECRET_KEY must be at least 32 characters for security (OWASP recommendation), current length: %d", len(secretKey))
+	}
+	
 	return &JWTConfig{
-		SecretKey: os.Getenv("JWT_SECRET_KEY"),
+		SecretKey: secretKey,
 		Issuer:    os.Getenv("JWT_ISSUER"),
 		Audience:  os.Getenv("JWT_AUDIENCE"),
-	}
+	}, nil
 }
 
 // XMLBufferConfig contiene la configuración del buffer XML

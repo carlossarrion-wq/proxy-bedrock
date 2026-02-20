@@ -33,11 +33,13 @@ func (this *BedrockClient) processMetrics(ctx context.Context, user *auth.UserCo
 	metric.AWSRegion = this.config.Region
 	metric.ProcessingTimeMS = processingTimeMS
 	
-	// Calcular coste
-	cost, err := metrics.CalculateCost(
+	// Calcular coste con soporte para tokens de caché
+	cost, err := metrics.CalculateCostWithCache(
 		metric.ModelID,
 		int64(metric.TokensInput),
 		int64(metric.TokensOutput),
+		int64(metric.TokensCacheRead),
+		int64(metric.TokensCacheCreation),
 	)
 	if err != nil {
 		Log.Errorf("Failed to calculate cost: %v", err)

@@ -1,5 +1,7 @@
 # Binarios
 bedrock-proxy
+proxy-bedrock
+proxy-bedrock-old
 *.exe
 *.dll
 *.so

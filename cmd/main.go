@@ -99,24 +99,34 @@ func main() {
 	if db != nil {
 		fmt.Println("🔐 Inicializando middlewares de autenticación...")
 		
-		// Cargar config JWT
-		jwtConfig := pkg.LoadJWTConfigWithEnv()
-		
-		if jwtConfig.SecretKey != "" {
-			// Convertir a auth.JWTConfig
-			authConfig := auth.JWTConfig{
-				SecretKey: jwtConfig.SecretKey,
-				Issuer:    jwtConfig.Issuer,
-				Audience:  jwtConfig.Audience,
-			}
-			
-			authMiddleware = auth.NewAuthMiddleware(db, authConfig)
-			quotaMiddleware = quota.NewQuotaMiddleware(db)
-			
-			fmt.Println("✅ Middlewares inicializados")
-		} else {
-			fmt.Println("⚠️  JWT_SECRET_KEY no configurado, continuando sin auth")
+		// Cargar config JWT con validación de seguridad
+		jwtConfig, err := pkg.LoadJWTConfigWithEnv()
+		if err != nil {
+			// Error crítico: JWT_SECRET_KEY no cumple requisitos de seguridad
+			fmt.Printf("❌ Error crítico en configuración JWT: %v\n", err)
+			fmt.Println("💡 Solución:")
+			fmt.Println("   1. Asegúrate de que JWT_SECRET_KEY esté configurado en AWS Secrets Manager")
+			fmt.Println("   2. El secret debe tener al menos 32 caracteres")
+			fmt.Println("   3. En ECS Task Definition, configura:")
+			fmt.Println("      \"secrets\": [{")
+			fmt.Println("        \"name\": \"JWT_SECRET_KEY\",")
+			fmt.Println("        \"valueFrom\": \"arn:aws:secretsmanager:REGION:ACCOUNT:secret:bedrock-proxy/jwt-secret\"")
+			fmt.Println("      }]")
+			os.Exit(1)
 		}
+		
+		// Convertir a auth.JWTConfig
+		authConfig := auth.JWTConfig{
+			SecretKey: jwtConfig.SecretKey,
+			Issuer:    jwtConfig.Issuer,
+			Audience:  jwtConfig.Audience,
+		}
+		
+		authMiddleware = auth.NewAuthMiddleware(db, authConfig)
+		quotaMiddleware = quota.NewQuotaMiddleware(db)
+		
+		fmt.Println("✅ Middlewares inicializados correctamente")
+		fmt.Printf("✅ JWT Secret Key validado (longitud: %d caracteres)\n", len(jwtConfig.SecretKey))
 	}
 	
 	// Inicializar MetricsWorker y Scheduler (si BD disponible)

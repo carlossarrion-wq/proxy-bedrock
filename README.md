@@ -633,3 +633,43 @@ Chunk 2: "le>..."                 → Buffer completa: "<write_file>"
 - **Chunks pequeños:** Funciona incluso con streaming letra por letra
 - **Performance:** < 1ms de latencia adicional por chunk
 - **Sin falsos positivos:** No retiene `<` en contenido normal (ej: "x < 5")
+
+## 🐳 Despliegue Docker y ECS
+
+### Construir y Subir Imagen a ECR
+
+1. **Login en ECR** (ejecutar en EC2):
+```bash
+aws ecr get-login-password --region eu-west-1 | docker login --username AWS --password-stdin 701055077130.dkr.ecr.eu-west-1.amazonaws.com
+```
+
+2. **Construir imagen Docker**:
+```bash
+docker build -t bedrock-proxy .
+```
+
+3. **Tagear imagen para ECR**:
+```bash
+docker tag bedrock-proxy:latest 701055077130.dkr.ecr.eu-west-1.amazonaws.com/bedrock-proxy:latest
+```
+
+4. **Pushear imagen a ECR**:
+```bash
+docker push 701055077130.dkr.ecr.eu-west-1.amazonaws.com/bedrock-proxy:latest
+```
+
+### Desplegar en ECS
+
+Ejecutar desde tu terminal local (no en EC2):
+
+```bash
+aws ecs update-service --cluster bedrock-proxy-dev-cluster --service bedrock-proxy-dev-service --force-new-deployment --region eu-west-1
+```
+
+### Verificar Despliegue
+
+```bash
+aws ecs describe-services --cluster bedrock-proxy-dev-cluster --services bedrock-proxy-dev-service --region eu-west-1 --query 'services[0].deployments'
+```
+
+Espera a que el despliegue muestre `runningCount` igual a `desiredCount` y el deployment anterior se complete.
