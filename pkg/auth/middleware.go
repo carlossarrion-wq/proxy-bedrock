@@ -1,10 +1,13 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -114,10 +117,55 @@ func (am *AuthMiddleware) Middleware(next http.Handler) http.Handler {
 		// Validar firma y estructura del JWT
 		claims, err := ValidateToken(tokenString, am.jwtConfig.SecretKey)
 		if err != nil {
+			// Verificar si el error es por expiración
+			if strings.Contains(err.Error(), "token expired") || strings.Contains(err.Error(), "token is expired") {
+				// Token expirado - intentar decodificar para obtener claims
+				if unsafeClaims, decodeErr := DecodeTokenUnsafe(tokenString); decodeErr == nil {
+					// Tenemos los claims, intentar auto-regeneración
+					am.handleExpiredToken(w, r, tokenString, unsafeClaims)
+					return
+				}
+				// Si no se puede decodificar, continuar con error normal
+			}
+			
 			am.rateLimiter.RecordFailedAttempt(clientIP, tokenHash)
 			
-			// Registrar error de token inválido
-			am.RecordEarlyError(r, "", "", "token_invalid", fmt.Sprintf("invalid token: %v", err))
+			// Intentar decodificar sin validar para obtener info básica para tracking
+			var userID, email, person, team string
+			if unsafeClaims, decodeErr := DecodeTokenUnsafe(tokenString); decodeErr == nil {
+				userID = unsafeClaims.UserID
+				email = unsafeClaims.Email
+				person = unsafeClaims.Person
+				team = unsafeClaims.Team
+				
+				if Logger != nil {
+					Logger.InfoContext(r.Context(), amslog.Event{
+						Name:    "TOKEN_DECODE_SUCCESS",
+						Message: "Successfully decoded invalid token for tracking",
+						Fields: map[string]interface{}{
+							"user.id":     userID,
+							"user.email":  email,
+							"user.person": person,
+							"user.team":   team,
+						},
+					})
+				}
+			} else {
+				// Log si no se pudo decodificar
+				if Logger != nil {
+					Logger.WarningContext(r.Context(), amslog.Event{
+						Name:    "TOKEN_DECODE_FAILED",
+						Message: "Could not decode invalid token for tracking",
+						Error: &amslog.ErrorInfo{
+							Type:    "DecodeError",
+							Message: decodeErr.Error(),
+						},
+					})
+				}
+			}
+			
+			// Registrar error de token inválido con la info disponible
+			am.RecordEarlyError(r, userID, email, team, person, "token_invalid", fmt.Sprintf("invalid token: %v", err))
 			
 			am.respondError(w, r, http.StatusUnauthorized, fmt.Sprintf("invalid token: %v", err), "token_invalid", tokenString)
 			return
@@ -149,8 +197,8 @@ func (am *AuthMiddleware) Middleware(next http.Handler) http.Handler {
 		am.rateLimiter.RecordSuccessfulAttempt(clientIP)
 
 		// 4. VERIFICACIÓN DE CUOTA DIARIA
-		// Verificar y actualizar la cuota del usuario
-		quotaResult, err := am.db.CheckAndUpdateQuota(r.Context(), claims.UserID, claims.Email)
+		// Verificar y actualizar la cuota del usuario (incluyendo team del JWT)
+		quotaResult, err := am.db.CheckAndUpdateQuota(r.Context(), claims.UserID, claims.Email, claims.Team)
 		if err != nil {
 			am.respondError(w, r, http.StatusInternalServerError, 
 				fmt.Sprintf("error checking quota: %v", err), "quota_check_error", tokenString)
@@ -185,7 +233,7 @@ func (am *AuthMiddleware) Middleware(next http.Handler) http.Handler {
 			}
 			
 			// Registrar error de cuota excedida
-			am.RecordEarlyError(r, claims.UserID, claims.Email, "quota_exceeded", quotaResult.BlockReason)
+			am.RecordEarlyError(r, claims.UserID, claims.Email, claims.Team, claims.Person, "quota_exceeded", quotaResult.BlockReason)
 			
 			// Usar 401 para compatibilidad con clientes que no manejan bien 429
 			am.respondError(w, r, http.StatusUnauthorized, 
@@ -415,4 +463,218 @@ func getSecondsUntilMidnightUTC() string {
 	nextMidnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
 	seconds := int(nextMidnight.Sub(now).Seconds())
 	return fmt.Sprintf("%d", seconds)
+}
+
+// callLambdaAPI llama al endpoint de regeneración de tokens en la Lambda API
+func (am *AuthMiddleware) callLambdaAPI(ctx context.Context, expiredTokenJTI, userID, clientIP, userAgent string) (map[string]interface{}, error) {
+	// Obtener URL de la Lambda API desde variable de entorno
+	lambdaAPIURL := os.Getenv("LAMBDA_API_URL")
+	if lambdaAPIURL == "" {
+		return nil, fmt.Errorf("LAMBDA_API_URL environment variable not set")
+	}
+
+	// Construir request body
+	requestBody := map[string]interface{}{
+		"operation": "regenerate_token",
+		"data": map[string]interface{}{
+			"expired_token_jti": expiredTokenJTI,
+			"user_id":           userID,
+			"client_ip":         clientIP,
+			"user_agent":        userAgent,
+		},
+	}
+
+	jsonBody, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling request: %w", err)
+	}
+
+	// Crear HTTP request
+	req, err := http.NewRequestWithContext(ctx, "POST", lambdaAPIURL, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	// Ejecutar request con timeout
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error calling Lambda API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Leer response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading response: %w", err)
+	}
+
+	// Parse response
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("error parsing response: %w", err)
+	}
+
+	// Verificar si hubo error en la Lambda
+	if resp.StatusCode != http.StatusOK {
+		return result, fmt.Errorf("Lambda API returned status %d", resp.StatusCode)
+	}
+
+	return result, nil
+}
+
+// handleExpiredToken maneja el caso de un token expirado con posible auto-regeneración
+func (am *AuthMiddleware) handleExpiredToken(w http.ResponseWriter, r *http.Request, tokenString string, claims *JWTClaims) {
+	clientIP := getClientIP(r)
+	userAgent := r.Header.Get("User-Agent")
+
+	// Log del token expirado
+	if Logger != nil {
+		Logger.InfoContext(r.Context(), amslog.Event{
+			Name:    "TOKEN_EXPIRED",
+			Message: "Token has expired, checking auto-regeneration",
+			Fields: map[string]interface{}{
+				"user.id":    claims.UserID,
+				"user.email": claims.Email,
+				"user.team":  claims.Team,
+				"user.person": claims.Person,
+				"token.jti":  claims.ID,
+				"client.ip":  clientIP,
+			},
+		})
+	}
+
+	// Verificar si el token existe en BD y no está revocado
+	tokenHash := HashToken(tokenString)
+	tokenInfo, err := am.db.ValidateToken(r.Context(), tokenHash)
+	if err != nil {
+		// Token no encontrado o error de BD
+		am.respondError(w, r, http.StatusUnauthorized, 
+			"token has expired and is not valid for regeneration", 
+			"token_expired", tokenString)
+		return
+	}
+
+	// Verificar que no esté revocado
+	if tokenInfo.IsRevoked {
+		am.respondError(w, r, http.StatusUnauthorized, 
+			"token has expired and was revoked", 
+			"token_expired_revoked", tokenString)
+		return
+	}
+
+	// Llamar a Lambda API para intentar regeneración
+	result, err := am.callLambdaAPI(r.Context(), claims.ID, claims.UserID, clientIP, userAgent)
+	if err != nil {
+		// Error llamando a la API
+		if Logger != nil {
+			Logger.ErrorContext(r.Context(), amslog.Event{
+				Name:    "TOKEN_REGEN_API_ERROR",
+				Message: "Error calling Lambda API for token regeneration",
+				Error: &amslog.ErrorInfo{
+					Type:    "APIError",
+					Message: err.Error(),
+				},
+				Fields: map[string]interface{}{
+					"user.id":   claims.UserID,
+					"token.jti": claims.ID,
+				},
+			})
+		}
+
+		am.respondError(w, r, http.StatusUnauthorized,
+			"token has expired. Auto-regeneration failed. Please create a new token manually",
+			"token_expired_regen_failed", tokenString)
+		return
+	}
+
+	// Verificar resultado de la regeneración
+	success, ok := result["success"].(bool)
+	if !ok || !success {
+		// Regeneración falló - extraer error específico
+		errorType := "auto_regen_disabled"
+		errorMsg := "token has expired. Auto-regeneration is not enabled"
+
+		if errData, ok := result["error"].(string); ok {
+			errorType = errData
+			
+			// Mensajes específicos según el tipo de error
+			switch errData {
+			case "auto_regen_disabled":
+				errorMsg = "token has expired. Auto-regeneration is not enabled for this user"
+			case "max_tokens_reached":
+				errorMsg = "token has expired. Cannot auto-regenerate: maximum number of active tokens reached. Please revoke old tokens in the dashboard"
+				// Añadir información adicional si está disponible
+				if activeCount, ok := result["active_tokens_count"].(float64); ok {
+					if maxAllowed, ok := result["max_tokens_allowed"].(float64); ok {
+						errorResponse := map[string]interface{}{
+							"error": map[string]interface{}{
+								"type":                "token_expired_max_tokens",
+								"message":             errorMsg,
+								"code":                401,
+								"auto_regenerated":    false,
+								"active_tokens_count": int(activeCount),
+								"max_tokens_allowed":  int(maxAllowed),
+								"action_required":     "revoke_old_tokens",
+							},
+						}
+						
+						jsonResponse, _ := json.Marshal(errorResponse)
+						w.Header().Set("Content-Type", "application/json; charset=utf-8")
+						w.WriteHeader(http.StatusUnauthorized)
+						w.Write(jsonResponse)
+						return
+					}
+				}
+			case "already_regenerated":
+				errorMsg = "token has expired and was already regenerated"
+			case "token_revoked":
+				errorMsg = "token has expired and was revoked"
+			default:
+				errorMsg = fmt.Sprintf("token has expired. Auto-regeneration failed: %s", result["message"])
+			}
+		}
+
+		am.respondError(w, r, http.StatusUnauthorized, errorMsg, errorType, tokenString)
+		return
+	}
+
+	// Regeneración exitosa
+	emailSent, _ := result["email_sent"].(bool)
+	
+	if Logger != nil {
+		Logger.InfoContext(r.Context(), amslog.Event{
+			Name:    "TOKEN_REGENERATED",
+			Message: "Token regenerated successfully",
+			Outcome: amslog.OutcomeSuccess,
+			Fields: map[string]interface{}{
+				"user.id":       claims.UserID,
+				"user.email":    claims.Email,
+				"old_token.jti": claims.ID,
+				"new_token.jti": result["new_token_jti"],
+				"email_sent":    emailSent,
+			},
+		})
+	}
+
+	// Responder con mensaje de regeneración exitosa
+	errorResponse := map[string]interface{}{
+		"error": map[string]interface{}{
+			"type":             "token_expired_regenerated",
+			"message":          "token has expired. A new token has been generated and sent to your email",
+			"code":             401,
+			"auto_regenerated": true,
+			"email_sent":       emailSent,
+		},
+	}
+
+	jsonResponse, _ := json.Marshal(errorResponse)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusUnauthorized)
+	w.Write(jsonResponse)
 }
