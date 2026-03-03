@@ -10,18 +10,18 @@ import (
 
 // TokenInfo contiene la información de un token JWT validado
 type TokenInfo struct {
-	JTI           string
-	UserID        string
-	Email         string
-	Team          string
-	Person        string
-	Role          string
-	IsRevoked     bool
-	ExpiresAt     time.Time
-	MonthlyQuota  float64
-	DailyLimit    float64
-	DailyReqLimit int
-	InferenceProfile string
+	JTI              string
+	UserID           string    // cognito_user_id
+	Email            string    // cognito_email
+	Team             string    // Extraído del JWT
+	Person           string    // Extraído del JWT
+	IsRevoked        bool
+	ExpiresAt        time.Time
+	InferenceProfile string    // model_arn desde profiles
+	ModelID          string    // ID del modelo
+	ModelName        string    // Nombre del modelo
+	ProfileName      string    // Nombre del perfil
+	CognitoGroupName string    // Grupo de Cognito
 }
 
 // QuotaInfo contiene información de uso de quotas
@@ -39,27 +39,27 @@ type QuotaInfo struct {
 }
 
 // ValidateToken valida un token JWT contra la base de datos
+// NOTA: team y person deben extraerse de los claims del JWT, no de la BD
 func (db *Database) ValidateToken(ctx context.Context, tokenHash string) (*TokenInfo, error) {
 	query := `
 		SELECT 
 			t.jti,
-			t.user_id,
-			u.email,
-			u.team,
-			u.person,
-			u.role,
+			t.cognito_user_id,
+			t.cognito_email,
 			t.is_revoked,
 			t.expires_at,
-			u.monthly_quota_usd,
-			u.daily_limit_usd,
-			u.daily_request_limit,
-			u.default_inference_profile
-		FROM tokens t
-		JOIN users u ON t.user_id = u.iam_username
+			p.model_arn,
+			p.profile_name,
+			p.cognito_group_name,
+			m.id,
+			m.model_name
+		FROM "identity-manager-tokens-tbl" t
+		JOIN "identity-manager-profiles-tbl" p ON t.application_profile_id = p.id
+		JOIN "identity-manager-models-tbl" m ON p.model_id = m.id
 		WHERE t.token_hash = $1
 			AND t.is_revoked = false
 			AND t.expires_at > NOW()
-			AND u.is_active = true
+			AND p.is_active = true
 	`
 
 	var info TokenInfo
@@ -67,15 +67,13 @@ func (db *Database) ValidateToken(ctx context.Context, tokenHash string) (*Token
 		&info.JTI,
 		&info.UserID,
 		&info.Email,
-		&info.Team,
-		&info.Person,
-		&info.Role,
 		&info.IsRevoked,
 		&info.ExpiresAt,
-		&info.MonthlyQuota,
-		&info.DailyLimit,
-		&info.DailyReqLimit,
 		&info.InferenceProfile,
+		&info.ProfileName,
+		&info.CognitoGroupName,
+		&info.ModelID,
+		&info.ModelName,
 	)
 
 	if err != nil {
@@ -85,10 +83,14 @@ func (db *Database) ValidateToken(ctx context.Context, tokenHash string) (*Token
 		return nil, fmt.Errorf("error validating token: %w", err)
 	}
 
+	// IMPORTANTE: Team y Person deben ser extraídos de los claims del JWT
+	// por el middleware de autenticación, no de la base de datos
 	return &info, nil
 }
 
 // CheckQuota verifica si el usuario tiene quota disponible
+// Deprecated: Use CheckAndUpdateQuota() from quota_queries.go instead
+// Esta función usa las tablas antiguas y será eliminada en una futura versión
 func (db *Database) CheckQuota(ctx context.Context, userID string) (*QuotaInfo, error) {
 	query := `
 		SELECT 
@@ -155,6 +157,8 @@ type MetricData struct {
 }
 
 // InsertMetric inserta una métrica de request en la base de datos
+// Deprecated: Use InsertUsageTracking() from quota_queries.go instead
+// Esta función usa la tabla antigua request_metrics y será eliminada
 func (db *Database) InsertMetric(ctx context.Context, metric *MetricData) error {
 	query := `
 		INSERT INTO request_metrics (
@@ -195,6 +199,8 @@ func (db *Database) InsertMetric(ctx context.Context, metric *MetricData) error 
 }
 
 // UpdateQuotaAndCounters actualiza las quotas y contadores después de un request
+// Deprecated: La función CheckAndUpdateQuota() ahora maneja esto automáticamente
+// Esta función usa las tablas antiguas y será eliminada en una futura versión
 func (db *Database) UpdateQuotaAndCounters(ctx context.Context, userID string, costUSD float64) error {
 	// Iniciar transacción
 	tx, err := db.pool.Begin(ctx)
@@ -243,6 +249,8 @@ func (db *Database) UpdateQuotaAndCounters(ctx context.Context, userID string, c
 }
 
 // CheckAndBlockUser verifica si el usuario debe ser bloqueado por exceder límites
+// Deprecated: La función CheckAndUpdateQuota() ahora maneja esto automáticamente
+// Esta función usa las tablas antiguas y será eliminada en una futura versión
 func (db *Database) CheckAndBlockUser(ctx context.Context, userID string) error {
 	query := `
 		UPDATE user_blocking_status ubs

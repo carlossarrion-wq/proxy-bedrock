@@ -9,10 +9,10 @@ import (
 	"bedrock-proxy-test/pkg/database"
 )
 
-// MetricsWorker gestiona la inserción asíncrona de métricas
+// MetricsWorker gestiona la inserción asíncrona de métricas de uso
 type MetricsWorker struct {
 	db            *database.Database
-	metricsChan   chan *database.MetricData
+	metricsChan   chan *database.UsageTrackingData
 	batchSize     int
 	flushInterval time.Duration
 	wg            sync.WaitGroup
@@ -41,7 +41,7 @@ func DefaultConfig() Config {
 func NewMetricsWorker(db *database.Database, config Config) *MetricsWorker {
 	return &MetricsWorker{
 		db:            db,
-		metricsChan:   make(chan *database.MetricData, config.BufferSize),
+		metricsChan:   make(chan *database.UsageTrackingData, config.BufferSize),
 		batchSize:     config.BatchSize,
 		flushInterval: config.FlushInterval,
 		stopChan:      make(chan struct{}),
@@ -59,7 +59,7 @@ func (mw *MetricsWorker) Start() {
 func (mw *MetricsWorker) run() {
 	defer mw.wg.Done()
 
-	batch := make([]*database.MetricData, 0, mw.batchSize)
+	batch := make([]*database.UsageTrackingData, 0, mw.batchSize)
 	ticker := time.NewTicker(mw.flushInterval)
 	defer ticker.Stop()
 
@@ -72,14 +72,14 @@ func (mw *MetricsWorker) run() {
 			// Si el batch está lleno, insertar
 			if len(batch) >= mw.batchSize {
 				mw.flushBatch(batch)
-				batch = make([]*database.MetricData, 0, mw.batchSize)
+				batch = make([]*database.UsageTrackingData, 0, mw.batchSize)
 			}
 
 		case <-ticker.C:
 			// Flush periódico aunque el batch no esté lleno
 			if len(batch) > 0 {
 				mw.flushBatch(batch)
-				batch = make([]*database.MetricData, 0, mw.batchSize)
+				batch = make([]*database.UsageTrackingData, 0, mw.batchSize)
 			}
 
 		case <-mw.stopChan:
@@ -93,7 +93,7 @@ func (mw *MetricsWorker) run() {
 }
 
 // flushBatch inserta un batch de métricas en la base de datos
-func (mw *MetricsWorker) flushBatch(batch []*database.MetricData) {
+func (mw *MetricsWorker) flushBatch(batch []*database.UsageTrackingData) {
 	if len(batch) == 0 {
 		return
 	}
@@ -101,27 +101,59 @@ func (mw *MetricsWorker) flushBatch(batch []*database.MetricData) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Insertar cada métrica (PostgreSQL maneja el particionamiento automáticamente)
+	// Insertar cada métrica usando la nueva tabla de usage tracking
 	successCount := 0
 	errorCount := 0
 
 	for _, metric := range batch {
-		if err := mw.db.InsertMetric(ctx, metric); err != nil {
-			// Log error pero continuar con las demás métricas
-			fmt.Printf("[MetricsWorker] Error inserting metric: %v\n", err)
+		// Log detallado de cada métrica antes de insertar
+		fmt.Printf("[MetricsWorker] Inserting usage tracking: user=%s, model=%s, tokens_in=%d, tokens_out=%d\n",
+			metric.CognitoUserID, metric.ModelID, metric.TokensInput, metric.TokensOutput)
+		
+		if err := mw.db.InsertUsageTracking(ctx, metric); err != nil {
+			// Log error detallado
+			fmt.Printf("[MetricsWorker] ❌ Error inserting usage tracking: %v\n", err)
+			fmt.Printf("[MetricsWorker] Failed metric details: user=%s, email=%s, model=%s\n",
+				metric.CognitoUserID, metric.CognitoEmail, metric.ModelID)
 			errorCount++
 		} else {
+			fmt.Printf("[MetricsWorker] ✅ Successfully inserted usage tracking for user %s\n", metric.CognitoUserID)
 			successCount++
 		}
 	}
 
-	if successCount > 0 {
-		fmt.Printf("[MetricsWorker] Flushed batch: %d success, %d errors\n", successCount, errorCount)
+	if successCount > 0 || errorCount > 0 {
+		fmt.Printf("[MetricsWorker] Batch flush complete: %d success, %d errors\n", successCount, errorCount)
 	}
 }
 
 // RecordMetric añade una métrica al canal para procesamiento asíncrono
+// Deprecated: Use RecordUsageTracking instead
 func (mw *MetricsWorker) RecordMetric(metric *database.MetricData) error {
+	// Convertir MetricData a UsageTrackingData para compatibilidad
+	usageData := &database.UsageTrackingData{
+		CognitoUserID:       metric.UserID,
+		CognitoEmail:        "", // No disponible en MetricData antigua
+		RequestTimestamp:    metric.RequestTimestamp,
+		ModelID:             metric.ModelID,
+		SourceIP:            metric.SourceIP,
+		UserAgent:           metric.UserAgent,
+		AWSRegion:           metric.AWSRegion,
+		TokensInput:         metric.TokensInput,
+		TokensOutput:        metric.TokensOutput,
+		TokensCacheRead:     metric.TokensCacheRead,
+		TokensCacheCreation: metric.TokensCacheCreation,
+		CostUSD:             metric.CostUSD,
+		ProcessingTimeMS:    metric.ProcessingTimeMS,
+		ResponseStatus:      metric.ResponseStatus,
+		ErrorMessage:        metric.ErrorMessage,
+	}
+	
+	return mw.RecordUsageTracking(usageData)
+}
+
+// RecordUsageTracking añade datos de uso al canal para procesamiento asíncrono
+func (mw *MetricsWorker) RecordUsageTracking(data *database.UsageTrackingData) error {
 	mw.mu.Lock()
 	defer mw.mu.Unlock()
 
@@ -131,11 +163,11 @@ func (mw *MetricsWorker) RecordMetric(metric *database.MetricData) error {
 
 	// Intentar enviar al canal sin bloquear
 	select {
-	case mw.metricsChan <- metric:
+	case mw.metricsChan <- data:
 		return nil
 	default:
 		// Canal lleno, métrica se pierde (o podríamos bloquear aquí)
-		return fmt.Errorf("metrics channel is full, metric dropped")
+		return fmt.Errorf("metrics channel is full, usage tracking dropped")
 	}
 }
 

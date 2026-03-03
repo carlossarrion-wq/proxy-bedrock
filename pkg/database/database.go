@@ -2,9 +2,13 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -24,6 +28,56 @@ type DatabaseConfig struct {
 type Database struct {
 	pool   *pgxpool.Pool
 	config *DatabaseConfig
+}
+
+// DBSecret representa la estructura del secreto en AWS Secrets Manager
+type DBSecret struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Database string `json:"dbname"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// NewDatabaseFromSecret crea una nueva instancia de Database usando AWS Secrets Manager
+func NewDatabaseFromSecret(ctx context.Context, secretARN string, sslMode string, maxConns, minConns int32) (*Database, error) {
+	// Cargar configuración de AWS
+	cfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("error loading AWS config: %w", err)
+	}
+
+	// Crear cliente de Secrets Manager
+	client := secretsmanager.NewFromConfig(cfg)
+
+	// Obtener el secreto
+	result, err := client.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{
+		SecretId: aws.String(secretARN),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error getting secret from AWS Secrets Manager: %w", err)
+	}
+
+	// Parsear el secreto
+	var dbSecret DBSecret
+	if err := json.Unmarshal([]byte(*result.SecretString), &dbSecret); err != nil {
+		return nil, fmt.Errorf("error parsing database secret: %w", err)
+	}
+
+	// Crear DatabaseConfig desde el secreto
+	dbConfig := &DatabaseConfig{
+		Host:     dbSecret.Host,
+		Port:     dbSecret.Port,
+		Database: dbSecret.Database,
+		User:     dbSecret.Username,
+		Password: dbSecret.Password,
+		SSLMode:  sslMode,
+		MaxConns: maxConns,
+		MinConns: minConns,
+	}
+
+	// Crear la conexión usando la configuración
+	return NewDatabase(dbConfig)
 }
 
 // NewDatabase crea una nueva instancia de Database y establece la conexión
@@ -95,69 +149,29 @@ func (db *Database) Stats() *pgxpool.Stat {
 	return db.pool.Stat()
 }
 
-// ResetResult contiene los resultados del reset diario
-type ResetResult struct {
-	UsersReset     int
-	UsersUnblocked int
-	CountersReset  int
-}
-
-// ResetDailyCounters resetea los contadores diarios y desbloquea usuarios
-func (db *Database) ResetDailyCounters(ctx context.Context) (*ResetResult, error) {
-	// Iniciar transacción
-	tx, err := db.pool.Begin(ctx)
+// GetSecretFromSecretsManager obtiene un secreto de AWS Secrets Manager
+// Retorna el valor del secreto como string
+func GetSecretFromSecretsManager(ctx context.Context, secretARN string) (string, error) {
+	// Crear cliente de Secrets Manager
+	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("error starting transaction: %w", err)
+		return "", fmt.Errorf("failed to load AWS config: %w", err)
 	}
-	defer tx.Rollback(ctx)
-
-	result := &ResetResult{}
-
-	// 1. Contar usuarios que serán desbloqueados
-	err = tx.QueryRow(ctx, `
-		SELECT COUNT(*)
-		FROM user_blocking_status
-		WHERE is_blocked = true 
-		  AND last_request_at < CURRENT_DATE
-		  AND blocked_by_admin_id IS NULL
-	`).Scan(&result.UsersUnblocked)
+	
+	client := secretsmanager.NewFromConfig(cfg)
+	
+	// Obtener el secreto
+	result, err := client.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{
+		SecretId: aws.String(secretARN),
+	})
 	if err != nil {
-		return nil, fmt.Errorf("error counting users to unblock: %w", err)
+		return "", fmt.Errorf("failed to get secret value: %w", err)
 	}
-
-	// 2. Resetear contadores y desbloquear usuarios con bloqueo automático
-	cmdTag, err := tx.Exec(ctx, `
-		UPDATE user_blocking_status
-		SET daily_requests = 0,
-		    daily_cost_usd = 0.0,
-		    is_blocked = false,
-		    blocked_reason = NULL,
-		    blocked_at = NULL,
-		    blocked_until = NULL,
-		    last_reset_at = NOW(),
-		    updated_at = NOW()
-		WHERE last_request_at < CURRENT_DATE
-		  AND blocked_by_admin_id IS NULL
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("error resetting counters: %w", err)
+	
+	// Retornar el valor del secreto
+	if result.SecretString != nil {
+		return *result.SecretString, nil
 	}
-	result.CountersReset = int(cmdTag.RowsAffected())
-
-	// 3. Contar usuarios afectados
-	err = tx.QueryRow(ctx, `
-		SELECT COUNT(DISTINCT user_id)
-		FROM user_blocking_status
-		WHERE last_reset_at::date = CURRENT_DATE
-	`).Scan(&result.UsersReset)
-	if err != nil {
-		return nil, fmt.Errorf("error counting reset users: %w", err)
-	}
-
-	// Commit de la transacción
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("error committing transaction: %w", err)
-	}
-
-	return result, nil
+	
+	return "", fmt.Errorf("secret does not contain a string value")
 }

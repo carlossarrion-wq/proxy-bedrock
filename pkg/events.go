@@ -20,6 +20,8 @@ const (
 	EventAuthJWTValidate = "AUTH_JWT_VALIDATE"
 	EventAuthJWTError    = "AUTH_JWT_ERROR"
 	EventAuthLogin       = "AUTH_LOGIN"
+	EventAuthSuccess     = "AUTH_SUCCESS"
+	EventAuthFailure     = "AUTH_FAILURE"
 )
 
 // Eventos de Quota

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -31,7 +32,6 @@ import (
 	"bedrock-proxy-test/pkg/auth"
 	"bedrock-proxy-test/pkg/database"
 	"bedrock-proxy-test/pkg/metrics"
-	"bedrock-proxy-test/pkg/quota"
 )
 
 // Constantes para configuración de Bedrock
@@ -124,7 +124,7 @@ type BedrockClient struct {
 	client        *bedrockRuntime.Client
 	db            *database.Database
 	metricsWorker *metrics.MetricsWorker
-	quotaMw       *quota.QuotaMiddleware
+	modelResolver *metrics.ModelResolver
 }
 
 type ModelInfo struct {
@@ -404,10 +404,13 @@ func NewBedrockClient(config *BedrockConfig) *BedrockClient {
 }
 
 // SetDependencies establece las dependencias para post-processing
-func (this *BedrockClient) SetDependencies(db *database.Database, mw *metrics.MetricsWorker, qm *quota.QuotaMiddleware) {
+func (this *BedrockClient) SetDependencies(db *database.Database, mw *metrics.MetricsWorker) {
 	this.db = db
 	this.metricsWorker = mw
-	this.quotaMw = qm
+	// Crear ModelResolver si tenemos BD
+	if db != nil {
+		this.modelResolver = metrics.NewModelResolver(db.GetPool())
+	}
 }
 
 func (this *BedrockClient) GetModelMappings(source string) (string, error) {
@@ -677,8 +680,41 @@ func convertAnthropicToBedrockMessages(anthropicMessages []interface{}, forcePro
 						}
 					}
 				case "image":
-					// Manejar imágenes si es necesario
-					// Por ahora las ignoramos
+					// Manejar imágenes - convertir formato Anthropic a Bedrock
+					if source, ok := blockMap["source"].(map[string]interface{}); ok {
+						sourceType, _ := source["type"].(string)
+						
+						if sourceType == "base64" {
+							// Extraer datos de la imagen
+							mediaType, _ := source["media_type"].(string)
+							data, _ := source["data"].(string)
+							
+							// Decodificar base64 a bytes
+							imageBytes, err := base64.StdEncoding.DecodeString(data)
+							if err != nil {
+								Logger.Error(amslog.Event{
+									Name:    "IMAGE_DECODE_ERROR",
+									Message: "Failed to decode base64 image",
+									Error: &amslog.ErrorInfo{
+										Type:    "DecodeError",
+										Message: err.Error(),
+									},
+								})
+								continue
+							}
+							
+							// Crear bloque de imagen para Bedrock
+							imageBlock := &types.ContentBlockMemberImage{
+								Value: types.ImageBlock{
+									Format: types.ImageFormat(strings.TrimPrefix(mediaType, "image/")),
+									Source: &types.ImageSourceMemberBytes{
+										Value: imageBytes,
+									},
+								},
+							}
+							contentBlocks = append(contentBlocks, imageBlock)
+						}
+					}
 				}
 			}
 		}
@@ -1215,6 +1251,11 @@ func (this *BedrockClient) HandleProxy(w http.ResponseWriter, r *http.Request) {
 					Code:    "BEDROCK_STREAM_FAILED",
 				},
 			})
+			
+			// Marcar error en MetricsCapture si existe
+			if metricsCapture != nil {
+				metricsCapture.MarkError(err.Error())
+			}
 		}
 		
 		endPhase()

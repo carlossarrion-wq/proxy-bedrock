@@ -25,42 +25,51 @@ func (this *BedrockClient) processMetrics(ctx context.Context, user *auth.UserCo
 	// Obtener métricas capturadas
 	metric := mc.GetMetrics()
 	
-	// Completar información del usuario y tiempo
-	metric.UserID = user.UserID
-	metric.Team = user.Team
-	metric.Person = user.Person
-	metric.RequestTimestamp = startTime
-	metric.AWSRegion = this.config.Region
-	metric.ProcessingTimeMS = processingTimeMS
-	
-	// Calcular coste con soporte para tokens de caché
-	cost, err := metrics.CalculateCostWithCache(
+	// Calcular coste con soporte para tokens de caché y resolución de ARNs
+	cost, err := metrics.CalculateCostWithCacheAndResolver(
 		metric.ModelID,
 		int64(metric.TokensInput),
 		int64(metric.TokensOutput),
 		int64(metric.TokensCacheRead),
-		int64(metric.TokensCacheCreation),
+		int64(metric.TokensCacheWriteTokens),
+		this.modelResolver,
 	)
 	if err != nil {
 		Log.Errorf("Failed to calculate cost: %v", err)
 		cost = 0.0
 	}
-	metric.CostUSD = cost
 	
-	// 1. Guardar métrica (asíncrono via worker)
-	if err := this.metricsWorker.RecordMetric(metric); err != nil {
-		Log.Errorf("Failed to record metric: %v", err)
+	// Log de debug para verificar cálculo de coste
+	Log.Infof("[COST_DEBUG] Model: %s | Input: %d | Output: %d | CacheRead: %d | CacheWrite: %d | Cost: $%.8f",
+		metric.ModelID, metric.TokensInput, metric.TokensOutput, 
+		metric.TokensCacheRead, metric.TokensCacheWriteTokens, cost)
+	
+	// Crear datos de tracking de uso
+	usageData := &database.UsageTrackingData{
+		CognitoUserID:       user.UserID,
+		CognitoEmail:        user.Email,
+		RequestTimestamp:    startTime,
+		ModelID:             metric.ModelID,
+		SourceIP:            metric.SourceIP,
+		UserAgent:           metric.UserAgent,
+		AWSRegion:           this.config.Region,
+		TokensInput:         metric.TokensInput,
+		TokensOutput:        metric.TokensOutput,
+		TokensCacheRead:     metric.TokensCacheRead,
+		TokensCacheCreation: metric.TokensCacheWriteTokens,
+		CostUSD:             cost,
+		ProcessingTimeMS:    processingTimeMS,
+		ResponseStatus:      metric.ResponseStatus,
+		ErrorMessage:        metric.ErrorMessage,
 	}
 	
-	// 2. Actualizar quotas (síncrono - importante para límites)
-	if err := this.db.UpdateQuotaAndCounters(ctx, user.UserID, cost); err != nil {
-		Log.Errorf("Failed to update quota: %v", err)
+	// Guardar tracking de uso (asíncrono via worker)
+	if err := this.metricsWorker.RecordUsageTracking(usageData); err != nil {
+		Log.Errorf("Failed to record usage tracking: %v", err)
 	}
 	
-	// 3. Verificar si debe bloquearse el usuario
-	if err := this.db.CheckAndBlockUser(ctx, user.UserID); err != nil {
-		Log.Errorf("Failed to check/block user: %v", err)
-	}
+	// NOTA: La verificación y actualización de cuota ya se hizo en el middleware
+	// No es necesario llamar a UpdateQuotaAndCounters ni CheckAndBlockUser aquí
 	
 	Log.Infof("[METRICS] User: %s | Tokens: %d/%d | Cost: $%.6f | Time: %dms",
 		user.UserID, metric.TokensInput, metric.TokensOutput, cost, processingTimeMS)
@@ -209,8 +218,8 @@ func (mc *MetricsCapture) extractTokensFromEvent(eventType, jsonData string) {
 	}
 }
 
-func (mc *MetricsCapture) GetMetrics() *database.MetricData {
-	return &database.MetricData{
+func (mc *MetricsCapture) GetMetrics() *MetricData {
+	return &MetricData{
 		ModelID:             mc.modelID,
 		RequestID:           mc.requestID,
 		SourceIP:            mc.sourceIP,
@@ -218,10 +227,24 @@ func (mc *MetricsCapture) GetMetrics() *database.MetricData {
 		TokensInput:         mc.inputTokens,
 		TokensOutput:        mc.outputTokens,
 		TokensCacheRead:     mc.cacheReadTokens,
-		TokensCacheCreation: mc.cacheWriteTokens,
+		TokensCacheWriteTokens: mc.cacheWriteTokens,
 		ResponseStatus:      mc.getStatusString(),
 		ErrorMessage:        mc.errorMessage,
 	}
+}
+
+// MetricData es una estructura local para captura de métricas
+type MetricData struct {
+	ModelID             string
+	RequestID           string
+	SourceIP            string
+	UserAgent           string
+	TokensInput         int
+	TokensOutput        int
+	TokensCacheRead     int
+	TokensCacheWriteTokens int
+	ResponseStatus      string
+	ErrorMessage        string
 }
 
 func (mc *MetricsCapture) getStatusString() string {
@@ -232,4 +255,15 @@ func (mc *MetricsCapture) getStatusString() string {
 		return "success"
 	}
 	return fmt.Sprintf("http_%d", mc.statusCode)
+}
+
+// MarkError marca explícitamente un error en la captura de métricas
+func (mc *MetricsCapture) MarkError(errorMsg string) {
+	mc.hasError = true
+	if mc.errorMessage == "" {
+		mc.errorMessage = errorMsg
+	} else {
+		// Si ya hay un mensaje de error, añadir el nuevo
+		mc.errorMessage = mc.errorMessage + "; " + errorMsg
+	}
 }

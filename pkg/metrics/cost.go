@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"fmt"
+	"strings"
 )
 
 // ModelPricing contiene los precios por modelo de Bedrock
@@ -72,6 +73,12 @@ var PricingTable = map[string]ModelPricing{
 		CacheReadPer1KTokens:  0.0003,  // $0.30 per 1M cache read tokens
 	},
 	"arn:aws:bedrock:eu-west-1:701055077130:application-inference-profile/kb2twga41cr4": {
+		InputPer1KTokens:      0.003,   // $3 per 1M input tokens (Claude Sonnet 4.5)
+		OutputPer1KTokens:     0.015,   // $15 per 1M output tokens
+		CacheWritePer1KTokens: 0.00375, // $3.75 per 1M cache write tokens (5m)
+		CacheReadPer1KTokens:  0.0003,  // $0.30 per 1M cache read tokens
+	},
+	"arn:aws:bedrock:eu-west-1:701055077130:application-inference-profile/invmw8994b4y": {
 		InputPer1KTokens:      0.003,   // $3 per 1M input tokens (Claude Sonnet 4.5)
 		OutputPer1KTokens:     0.015,   // $15 per 1M output tokens
 		CacheWritePer1KTokens: 0.00375, // $3.75 per 1M cache write tokens (5m)
@@ -202,25 +209,45 @@ func CalculateCostBreakdown(modelID string, inputTokens, outputTokens int64) (*C
 }
 
 // CalculateCostWithCache calcula el coste considerando tokens de caché
-// Esta función calcula correctamente el coste aplicando precios diferenciados para:
-// - Tokens normales de entrada: precio completo
-// - Tokens de salida: precio completo
-// - Cache read tokens: precio con descuento (90% descuento)
-// - Cache write tokens: precio de cache write (25% más caro que input normal)
+// IMPORTANTE: Según la API de Bedrock:
+// - inputTokens: tokens normales de entrada (NO incluye tokens de caché)
+// - outputTokens: tokens de salida generados
+// - cacheReadTokens: tokens leídos desde caché (separados de inputTokens)
+// - cacheWriteTokens: tokens escritos en caché (separados de inputTokens)
+//
+// Precios aplicados:
+// - Input normal: precio completo ($3 per 1M para Sonnet 4.5)
+// - Output: precio completo ($15 per 1M para Sonnet 4.5)
+// - Cache read: precio con descuento 90% ($0.30 per 1M para Sonnet 4.5)
+// - Cache write: precio premium 25% más ($3.75 per 1M para Sonnet 4.5)
+//
+// Si modelResolver no es nil y modelID es un ARN, intenta resolver al modelo base
 func CalculateCostWithCache(modelID string, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens int64) (float64, error) {
-	pricing, exists := PricingTable[modelID]
-	if !exists {
-		return 0, fmt.Errorf("pricing not found for model: %s", modelID)
+	return CalculateCostWithCacheAndResolver(modelID, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, nil)
+}
+
+// CalculateCostWithCacheAndResolver calcula el coste con soporte para resolver ARNs
+func CalculateCostWithCacheAndResolver(modelID string, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens int64, resolver *ModelResolver) (float64, error) {
+	// Si tenemos un resolver y el modelID es un ARN, intentar resolver
+	resolvedModelID := modelID
+	if resolver != nil && strings.HasPrefix(modelID, "arn:aws:bedrock:") {
+		var err error
+		resolvedModelID, err = resolver.ResolveModelID(modelID)
+		if err != nil {
+			// Si falla la resolución, intentar con el ARN directamente
+			// (fallback a la tabla de precios con ARNs)
+			resolvedModelID = modelID
+		}
 	}
 
-	// Calcular tokens normales de entrada (excluyendo los de caché)
-	normalInputTokens := inputTokens - cacheReadTokens - cacheWriteTokens
-	if normalInputTokens < 0 {
-		normalInputTokens = 0
+	pricing, exists := PricingTable[resolvedModelID]
+	if !exists {
+		return 0, fmt.Errorf("pricing not found for model: %s (resolved from: %s)", resolvedModelID, modelID)
 	}
 
 	// Calcular costes individuales
-	normalInputCost := (float64(normalInputTokens) / 1000.0) * pricing.InputPer1KTokens
+	// NOTA: inputTokens ya son solo los tokens normales, NO incluyen cache
+	inputCost := (float64(inputTokens) / 1000.0) * pricing.InputPer1KTokens
 	outputCost := (float64(outputTokens) / 1000.0) * pricing.OutputPer1KTokens
 	
 	// Para cache read y write, usar precios específicos si están disponibles
@@ -241,7 +268,7 @@ func CalculateCostWithCache(modelID string, inputTokens, outputTokens, cacheRead
 		cacheWriteCost = (float64(cacheWriteTokens) / 1000.0) * pricing.InputPer1KTokens
 	}
 
-	totalCost := normalInputCost + outputCost + cacheReadCost + cacheWriteCost
+	totalCost := inputCost + outputCost + cacheReadCost + cacheWriteCost
 
 	return totalCost, nil
 }

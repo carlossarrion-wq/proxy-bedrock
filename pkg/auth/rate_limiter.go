@@ -46,8 +46,8 @@ func NewRateLimiter() *RateLimiter {
 	rl := &RateLimiter{
 		ipAttempts:          make(map[string]*IPAttempts),
 		tokenAttempts:       make(map[string]*TokenAttempts),
-		maxAttemptsPerIP:    10,              // 10 intentos por ventana de tiempo
-		maxAttemptsPerToken: 5,               // 5 intentos por token
+		maxAttemptsPerIP:    50,              // 50 intentos por ventana de tiempo
+		maxAttemptsPerToken: 100,             // 100 intentos por token (aumentado para uso intensivo)
 		blockDuration:       15 * time.Minute, // Bloqueo de 15 minutos
 		cleanupInterval:     5 * time.Minute,  // Limpieza cada 5 minutos
 		windowDuration:      1 * time.Minute,  // Ventana de 1 minuto

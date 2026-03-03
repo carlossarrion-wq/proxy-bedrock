@@ -13,7 +13,6 @@ import (
 	"bedrock-proxy-test/pkg/auth"
 	"bedrock-proxy-test/pkg/database"
 	"bedrock-proxy-test/pkg/metrics"
-	"bedrock-proxy-test/pkg/quota"
 	"bedrock-proxy-test/pkg/scheduler"
 )
 
@@ -59,45 +58,39 @@ func main() {
 	// Inicializar conexión a PostgreSQL (opcional)
 	var db *database.Database
 	fmt.Println("🔌 Intentando conectar a PostgreSQL...")
-	dbConfig := pkg.LoadDatabaseConfigWithEnv()
 	
-	if dbConfig.Host != "" && dbConfig.User != "" && dbConfig.Password != "" {
-		var err error
-		db, err = database.NewDatabase(dbConfig)
-		if err != nil {
-			fmt.Printf("⚠️  Error conectando a PostgreSQL: %v\n", err)
-			fmt.Println("⚠️  El proxy continuará sin funcionalidades de BD (sin auth/cuotas)")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	
+	var err error
+	db, err = pkg.InitializeDatabase(ctx)
+	if err != nil {
+		fmt.Printf("⚠️  Error conectando a PostgreSQL: %v\n", err)
+		fmt.Println("⚠️  El proxy continuará sin funcionalidades de BD (sin auth/cuotas)")
+		db = nil
+	} else {
+		// Verificar conectividad
+		if err := db.Ping(ctx); err != nil {
+			fmt.Printf("⚠️  PostgreSQL ping falló: %v\n", err)
+			fmt.Println("⚠️  El proxy continuará sin funcionalidades de BD")
+			db.Close()
 			db = nil
 		} else {
-			// Verificar conectividad
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			
-			if err := db.Ping(ctx); err != nil {
-				fmt.Printf("⚠️  PostgreSQL ping falló: %v\n", err)
-				fmt.Println("⚠️  El proxy continuará sin funcionalidades de BD")
-				db.Close()
-				db = nil
-			} else {
-				fmt.Println("✅ PostgreSQL conectado exitosamente")
-				stats := db.Stats()
-				fmt.Printf("📊 Pool de conexiones - Total: %d, Idle: %d, Acquired: %d\n",
-					stats.TotalConns(), stats.IdleConns(), stats.AcquiredConns())
-			}
+			fmt.Println("✅ PostgreSQL conectado exitosamente")
+			stats := db.Stats()
+			fmt.Printf("📊 Pool de conexiones - Total: %d, Idle: %d, Acquired: %d\n",
+				stats.TotalConns(), stats.IdleConns(), stats.AcquiredConns())
 		}
-	} else {
-		fmt.Println("ℹ️  Variables de BD no configuradas, continuando sin BD")
 	}
 	
 	// Crear cliente Bedrock
 	client := pkg.NewBedrockClient(config)
 	
-	// Inicializar middlewares (si BD disponible)
+	// Inicializar middleware de autenticación (si BD disponible)
 	var authMiddleware *auth.AuthMiddleware
-	var quotaMiddleware *quota.QuotaMiddleware
 	
 	if db != nil {
-		fmt.Println("🔐 Inicializando middlewares de autenticación...")
+		fmt.Println("🔐 Inicializando middleware de autenticación...")
 		
 		// Cargar config JWT con validación de seguridad
 		jwtConfig, err := pkg.LoadJWTConfigWithEnv()
@@ -123,10 +116,13 @@ func main() {
 		}
 		
 		authMiddleware = auth.NewAuthMiddleware(db, authConfig)
-		quotaMiddleware = quota.NewQuotaMiddleware(db)
 		
-		fmt.Println("✅ Middlewares inicializados correctamente")
+		// Configurar el logger en el middleware de autenticación
+		auth.Logger = pkg.Logger
+		
+		fmt.Println("✅ Middleware de autenticación inicializado correctamente")
 		fmt.Printf("✅ JWT Secret Key validado (longitud: %d caracteres)\n", len(jwtConfig.SecretKey))
+		fmt.Println("✅ Verificación de cuota integrada en middleware de autenticación")
 	}
 	
 	// Inicializar MetricsWorker y Scheduler (si BD disponible)
@@ -150,19 +146,25 @@ func main() {
 		fmt.Println("✅ Scheduler iniciado")
 	}
 	
-	// Pasar dependencias al cliente Bedrock
+	// Pasar dependencias al cliente Bedrock y AuthMiddleware
 	if db != nil && metricsWorker != nil {
-		client.SetDependencies(db, metricsWorker, quotaMiddleware)
+		client.SetDependencies(db, metricsWorker)
+		
+		// Configurar MetricsWorker en AuthMiddleware para registro de errores tempranos
+		if authMiddleware != nil {
+			authMiddleware.SetMetricsWorker(metricsWorker)
+			fmt.Println("✅ MetricsWorker configurado en AuthMiddleware para registro de errores")
+		}
 	}
 	
 	// Configurar rutas
-	// Aplicar middlewares a /v1/messages si están disponibles
-	if authMiddleware != nil && quotaMiddleware != nil {
-		fmt.Println("🔒 Aplicando autenticación y control de cuotas a /v1/messages")
+	// Aplicar middleware de autenticación a /v1/messages si está disponible
+	// NOTA: La verificación de cuota está integrada en el middleware de autenticación
+	if authMiddleware != nil {
+		fmt.Println("🔒 Aplicando autenticación (con verificación de cuota) a /v1/messages")
 		
 		middlewares := []func(http.Handler) http.Handler{
 			authMiddleware.Middleware,
-			quotaMiddleware.Middleware,
 		}
 		
 		http.HandleFunc("/v1/messages", chainMiddlewares(client.HandleProxy, middlewares...))

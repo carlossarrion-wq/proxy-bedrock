@@ -84,20 +84,21 @@ func (s *SchedulerService) runDailyResetScheduler() {
 }
 
 // RunDailyReset ejecuta el reset de contadores diarios
+// NOTA: Con el nuevo sistema, el reset diario se hace automáticamente
+// mediante la función PostgreSQL check_and_update_quota() que detecta
+// cambios de día y resetea los contadores. Este scheduler se mantiene
+// para logging y monitoreo, pero no ejecuta acciones en BD.
 func (s *SchedulerService) RunDailyReset(ctx context.Context) error {
 	startTime := time.Now()
-	s.logger.Info("Starting daily reset process...")
+	s.logger.Info("Daily reset checkpoint - counters reset automatically by PostgreSQL function")
 	
-	// Ejecutar reset en la base de datos
-	result, err := s.db.ResetDailyCounters(ctx)
-	if err != nil {
-		return err
-	}
+	// El reset real se hace automáticamente en check_and_update_quota()
+	// cuando detecta que es un nuevo día (current_date > last_reset_date)
 	
+	// Aquí podríamos añadir métricas o logs adicionales si es necesario
 	duration := time.Since(startTime)
-	s.logger.Infof("Daily reset completed: %d users reset in %v", result.UsersReset, duration)
-	s.logger.Infof("  - Users unblocked: %d", result.UsersUnblocked)
-	s.logger.Infof("  - Counters reset: %d", result.CountersReset)
+	s.logger.Infof("Daily reset checkpoint completed in %v", duration)
+	s.logger.Info("Note: Actual counter reset happens automatically in PostgreSQL")
 	
 	return nil
 }
