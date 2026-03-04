@@ -38,9 +38,10 @@ type QuotaInfo struct {
 	BlockedReason    string
 }
 
-// ValidateToken valida un token JWT contra la base de datos
+// ValidateTokenAllowExpired valida un token JWT contra la base de datos
+// permitiendo tokens expirados (para regeneración automática)
 // NOTA: team y person deben extraerse de los claims del JWT, no de la BD
-func (db *Database) ValidateToken(ctx context.Context, tokenHash string) (*TokenInfo, error) {
+func (db *Database) ValidateTokenAllowExpired(ctx context.Context, tokenHash string) (*TokenInfo, error) {
 	query := `
 		SELECT 
 			t.jti,
@@ -57,8 +58,6 @@ func (db *Database) ValidateToken(ctx context.Context, tokenHash string) (*Token
 		JOIN "identity-manager-profiles-tbl" p ON t.application_profile_id = p.id
 		JOIN "identity-manager-models-tbl" m ON p.model_id = m.id
 		WHERE t.token_hash = $1
-			AND t.is_revoked = false
-			AND t.expires_at > NOW()
 			AND p.is_active = true
 	`
 
@@ -82,6 +81,15 @@ func (db *Database) ValidateToken(ctx context.Context, tokenHash string) (*Token
 		}
 		return nil, fmt.Errorf("error validating token: %w", err)
 	}
+
+	// Update last_used_at timestamp (silent operation)
+	updateQuery := `
+		UPDATE "identity-manager-tokens-tbl"
+		SET last_used_at = NOW()
+		WHERE token_hash = $1
+	`
+	_, _ = db.pool.Exec(ctx, updateQuery, tokenHash)
+	// Silently ignore errors - this is a non-critical operation
 
 	// IMPORTANTE: Team y Person deben ser extraídos de los claims del JWT
 	// por el middleware de autenticación, no de la base de datos

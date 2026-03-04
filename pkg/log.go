@@ -1,7 +1,6 @@
 package pkg
 
 import (
-	"fmt"
 	"os"
 
 	"bedrock-proxy-test/pkg/amslog"
@@ -87,75 +86,33 @@ var Log = &deprecatedLogger{}
 type deprecatedLogger struct{}
 
 func (l *deprecatedLogger) Infof(format string, args ...interface{}) {
-	if Logger != nil {
-		Logger.Info(amslog.Event{
-			Name:    "DEPRECATED_LOG",
-			Message: fmt.Sprintf(format, args...),
-		})
-	}
+	// Silenced - deprecated logger
 }
 
 func (l *deprecatedLogger) Errorf(format string, args ...interface{}) {
-	if Logger != nil {
-		Logger.Error(amslog.Event{
-			Name:    "DEPRECATED_LOG",
-			Message: fmt.Sprintf(format, args...),
-			Outcome: amslog.OutcomeFailure,
-		})
-	}
+	// Silenced - deprecated logger
 }
 
 func (l *deprecatedLogger) Warningf(format string, args ...interface{}) {
-	if Logger != nil {
-		Logger.Warning(amslog.Event{
-			Name:    "DEPRECATED_LOG",
-			Message: fmt.Sprintf(format, args...),
-		})
-	}
+	// Silenced - deprecated logger
 }
 
 func (l *deprecatedLogger) Debugf(format string, args ...interface{}) {
-	if Logger != nil {
-		Logger.Debug(amslog.Event{
-			Name:    "DEPRECATED_LOG",
-			Message: fmt.Sprintf(format, args...),
-		})
-	}
+	// Silenced - deprecated logger
 }
 
 func (l *deprecatedLogger) Info(args ...interface{}) {
-	if Logger != nil {
-		Logger.Info(amslog.Event{
-			Name:    "DEPRECATED_LOG",
-			Message: fmt.Sprint(args...),
-		})
-	}
+	// Silenced - deprecated logger
 }
 
 func (l *deprecatedLogger) Error(args ...interface{}) {
-	if Logger != nil {
-		Logger.Error(amslog.Event{
-			Name:    "DEPRECATED_LOG",
-			Message: fmt.Sprint(args...),
-			Outcome: amslog.OutcomeFailure,
-		})
-	}
+	// Silenced - deprecated logger
 }
 
 func (l *deprecatedLogger) Warning(args ...interface{}) {
-	if Logger != nil {
-		Logger.Warning(amslog.Event{
-			Name:    "DEPRECATED_LOG",
-			Message: fmt.Sprint(args...),
-		})
-	}
+	// Silenced - deprecated logger
 }
 
 func (l *deprecatedLogger) Debug(args ...interface{}) {
-	if Logger != nil {
-		Logger.Debug(amslog.Event{
-			Name:    "DEPRECATED_LOG",
-			Message: fmt.Sprint(args...),
-		})
-	}
+	// Silenced - deprecated logger
 }

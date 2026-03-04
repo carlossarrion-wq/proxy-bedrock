@@ -26,7 +26,6 @@ func LoadJWTConfigWithEnv() (*JWTConfig, error) {
 	// Intentar cargar desde AWS Secrets Manager primero
 	jwtSecretARN := os.Getenv("JWT_SECRET_ARN")
 	if jwtSecretARN != "" {
-		fmt.Printf("🔐 Cargando JWT_SECRET_KEY desde AWS Secrets Manager: %s\n", jwtSecretARN)
 		
 		secret, err := database.GetSecretFromSecretsManager(context.Background(), jwtSecretARN)
 		if err != nil {
@@ -52,13 +51,9 @@ func LoadJWTConfigWithEnv() (*JWTConfig, error) {
 			secretKey = secret
 		}
 		
-		fmt.Println("✅ JWT_SECRET_KEY cargado desde AWS Secrets Manager")
 	} else {
 		// Fallback: cargar desde variable de entorno
 		secretKey = os.Getenv("JWT_SECRET_KEY")
-		if secretKey != "" {
-			fmt.Println("⚠️  Usando JWT_SECRET_KEY desde variable de entorno (legacy)")
-		}
 	}
 	
 	// Validación crítica de seguridad: JWT secret debe existir
@@ -219,7 +214,6 @@ func InitializeDatabase(ctx context.Context) (*database.Database, error) {
 	config := LoadDatabaseConnectionConfig()
 	
 	if config.UseSecretsManager {
-		fmt.Printf("🔐 Conectando a BD usando AWS Secrets Manager: %s\n", config.SecretARN)
 		return database.NewDatabaseFromSecret(
 			ctx,
 			config.SecretARN,
@@ -233,8 +227,6 @@ func InitializeDatabase(ctx context.Context) (*database.Database, error) {
 	if config.Host == "" || config.User == "" || config.Password == "" {
 		return nil, fmt.Errorf("database configuration incomplete")
 	}
-	
-	fmt.Println("🔌 Conectando a BD usando variables de entorno (legacy)")
 	dbConfig := &database.DatabaseConfig{
 		Host:     config.Host,
 		Port:     config.Port,

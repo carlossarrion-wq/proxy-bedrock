@@ -107,23 +107,18 @@ func (mw *MetricsWorker) flushBatch(batch []*database.UsageTrackingData) {
 
 	for _, metric := range batch {
 		// Log detallado de cada métrica antes de insertar
-		fmt.Printf("[MetricsWorker] Inserting usage tracking: user=%s, model=%s, tokens_in=%d, tokens_out=%d\n",
-			metric.CognitoUserID, metric.ModelID, metric.TokensInput, metric.TokensOutput)
-		
-		if err := mw.db.InsertUsageTracking(ctx, metric); err != nil {
-			// Log error detallado
-			fmt.Printf("[MetricsWorker] ❌ Error inserting usage tracking: %v\n", err)
-			fmt.Printf("[MetricsWorker] Failed metric details: user=%s, email=%s, model=%s\n",
-				metric.CognitoUserID, metric.CognitoEmail, metric.ModelID)
+		err := mw.db.InsertUsageTracking(ctx, metric)
+		if err != nil {
+			// Only log errors, not successes
 			errorCount++
 		} else {
-			fmt.Printf("[MetricsWorker] ✅ Successfully inserted usage tracking for user %s\n", metric.CognitoUserID)
 			successCount++
 		}
 	}
 
-	if successCount > 0 || errorCount > 0 {
-		fmt.Printf("[MetricsWorker] Batch flush complete: %d success, %d errors\n", successCount, errorCount)
+	// Only log batch summary if there were errors
+	if errorCount > 0 {
+		fmt.Printf("[MetricsWorker] Batch complete: %d success, %d errors\n", successCount, errorCount)
 	}
 }
 
@@ -134,6 +129,8 @@ func (mw *MetricsWorker) RecordMetric(metric *database.MetricData) error {
 	usageData := &database.UsageTrackingData{
 		CognitoUserID:       metric.UserID,
 		CognitoEmail:        "", // No disponible en MetricData antigua
+		Team:                metric.Team,
+		Person:              metric.Person,
 		RequestTimestamp:    metric.RequestTimestamp,
 		ModelID:             metric.ModelID,
 		SourceIP:            metric.SourceIP,
@@ -189,8 +186,6 @@ func (mw *MetricsWorker) Stop() {
 
 	// Cerrar el canal de métricas
 	close(mw.metricsChan)
-
-	fmt.Println("[MetricsWorker] Stopped gracefully")
 }
 
 // Stats retorna estadísticas del worker
