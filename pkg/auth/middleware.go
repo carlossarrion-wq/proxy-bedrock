@@ -114,68 +114,57 @@ func (am *AuthMiddleware) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Validar firma y estructura del JWT
+		// PASO 1: Decodificar token sin validar expiración para obtener claims
+		unsafeClaims, decodeErr := DecodeTokenUnsafe(tokenString)
+		if decodeErr != nil {
+			am.rateLimiter.RecordFailedAttempt(clientIP, tokenHash)
+			am.respondError(w, r, http.StatusUnauthorized, fmt.Sprintf("invalid token format: %v", decodeErr), "token_decode_failed", tokenString)
+			return
+		}
+
+		// PASO 2: Validar token contra base de datos (permitiendo expirados para regeneración)
+		tokenInfo, err := am.db.ValidateTokenAllowExpired(r.Context(), tokenHash)
+		if err != nil {
+			am.rateLimiter.RecordFailedAttempt(clientIP, tokenHash)
+			am.respondError(w, r, http.StatusUnauthorized, fmt.Sprintf("token validation failed: %v", err), "token_validation_failed", tokenString)
+			return
+		}
+
+		// PASO 3: Validar firma y expiración del JWT
 		claims, err := ValidateToken(tokenString, am.jwtConfig.SecretKey)
 		if err != nil {
 			// Verificar si el error es por expiración
 			if strings.Contains(err.Error(), "token expired") || strings.Contains(err.Error(), "token is expired") {
-				// Token expirado - intentar decodificar para obtener claims
-				if unsafeClaims, decodeErr := DecodeTokenUnsafe(tokenString); decodeErr == nil {
-					// Tenemos los claims, intentar auto-regeneración
-					am.handleExpiredToken(w, r, tokenString, unsafeClaims)
-					return
-				}
-				// Si no se puede decodificar, continuar con error normal
+				// Token expirado pero existe en BD - intentar auto-regeneración
+				am.handleExpiredToken(w, r, tokenString, unsafeClaims, tokenInfo)
+				return
 			}
 			
+			// Otro tipo de error (firma inválida, etc.)
 			am.rateLimiter.RecordFailedAttempt(clientIP, tokenHash)
 			
-			// Intentar decodificar sin validar para obtener info básica para tracking
-			var userID, email, person, team string
-			if unsafeClaims, decodeErr := DecodeTokenUnsafe(tokenString); decodeErr == nil {
-				userID = unsafeClaims.UserID
-				email = unsafeClaims.Email
-				person = unsafeClaims.Person
-				team = unsafeClaims.Team
-				
-				if Logger != nil {
-					Logger.InfoContext(r.Context(), amslog.Event{
-						Name:    "TOKEN_DECODE_SUCCESS",
-						Message: "Successfully decoded invalid token for tracking",
-						Fields: map[string]interface{}{
-							"user.id":     userID,
-							"user.email":  email,
-							"user.person": person,
-							"user.team":   team,
-						},
-					})
-				}
-			} else {
-				// Log si no se pudo decodificar
-				if Logger != nil {
-					Logger.WarningContext(r.Context(), amslog.Event{
-						Name:    "TOKEN_DECODE_FAILED",
-						Message: "Could not decode invalid token for tracking",
-						Error: &amslog.ErrorInfo{
-							Type:    "DecodeError",
-							Message: decodeErr.Error(),
-						},
-					})
-				}
+			// Log del error
+			if Logger != nil {
+				Logger.WarningContext(r.Context(), amslog.Event{
+					Name:    "TOKEN_VALIDATION_FAILED",
+					Message: "Token validation failed",
+					Error: &amslog.ErrorInfo{
+						Type:    "ValidationError",
+						Message: err.Error(),
+					},
+					Fields: map[string]interface{}{
+						"user.id":     unsafeClaims.UserID,
+						"user.email":  unsafeClaims.Email,
+						"user.person": unsafeClaims.Person,
+						"user.team":   unsafeClaims.Team,
+					},
+				})
 			}
 			
-			// Registrar error de token inválido con la info disponible
-			am.RecordEarlyError(r, userID, email, team, person, "token_invalid", fmt.Sprintf("invalid token: %v", err))
+			// Registrar error de token inválido
+			am.RecordEarlyError(r, unsafeClaims.UserID, unsafeClaims.Email, unsafeClaims.Team, unsafeClaims.Person, "token_invalid", fmt.Sprintf("invalid token: %v", err))
 			
 			am.respondError(w, r, http.StatusUnauthorized, fmt.Sprintf("invalid token: %v", err), "token_invalid", tokenString)
-			return
-		}
-
-		// Validar token contra base de datos
-		tokenInfo, err := am.db.ValidateToken(r.Context(), tokenHash)
-		if err != nil {
-			am.rateLimiter.RecordFailedAttempt(clientIP, tokenHash)
-			am.respondError(w, r, http.StatusUnauthorized, fmt.Sprintf("token validation failed: %v", err), "token_validation_failed", tokenString)
 			return
 		}
 
@@ -529,7 +518,7 @@ func (am *AuthMiddleware) callLambdaAPI(ctx context.Context, expiredTokenJTI, us
 }
 
 // handleExpiredToken maneja el caso de un token expirado con posible auto-regeneración
-func (am *AuthMiddleware) handleExpiredToken(w http.ResponseWriter, r *http.Request, tokenString string, claims *JWTClaims) {
+func (am *AuthMiddleware) handleExpiredToken(w http.ResponseWriter, r *http.Request, tokenString string, claims *JWTClaims, tokenInfo *database.TokenInfo) {
 	clientIP := getClientIP(r)
 	userAgent := r.Header.Get("User-Agent")
 
@@ -549,18 +538,7 @@ func (am *AuthMiddleware) handleExpiredToken(w http.ResponseWriter, r *http.Requ
 		})
 	}
 
-	// Verificar si el token existe en BD y no está revocado
-	tokenHash := HashToken(tokenString)
-	tokenInfo, err := am.db.ValidateToken(r.Context(), tokenHash)
-	if err != nil {
-		// Token no encontrado o error de BD
-		am.respondError(w, r, http.StatusUnauthorized, 
-			"token has expired and is not valid for regeneration", 
-			"token_expired", tokenString)
-		return
-	}
-
-	// Verificar que no esté revocado
+	// Verificar que no esté revocado (ya tenemos tokenInfo del middleware)
 	if tokenInfo.IsRevoked {
 		am.respondError(w, r, http.StatusUnauthorized, 
 			"token has expired and was revoked", 

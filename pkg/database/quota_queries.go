@@ -33,6 +33,8 @@ type QuotaStatus struct {
 type UsageTrackingData struct {
 	CognitoUserID       string
 	CognitoEmail        string
+	Team                string    // Team from JWT token
+	Person              string    // Person from JWT token
 	RequestTimestamp    time.Time
 	ModelID             string
 	SourceIP            string
@@ -50,13 +52,13 @@ type UsageTrackingData struct {
 
 // CheckAndUpdateQuota verifica la cuota del usuario e incrementa el contador
 // Esta es la función principal que debe llamarse en cada petición
-func (db *Database) CheckAndUpdateQuota(ctx context.Context, cognitoUserID, cognitoEmail string) (*QuotaCheckResult, error) {
-	query := `SELECT * FROM check_and_update_quota($1, $2)`
+func (db *Database) CheckAndUpdateQuota(ctx context.Context, cognitoUserID, cognitoEmail, team string) (*QuotaCheckResult, error) {
+	query := `SELECT * FROM check_and_update_quota($1, $2, $3)`
 	
 	var result QuotaCheckResult
 	var blockReason *string
 	
-	err := db.pool.QueryRow(ctx, query, cognitoUserID, cognitoEmail).Scan(
+	err := db.pool.QueryRow(ctx, query, cognitoUserID, cognitoEmail, team).Scan(
 		&result.Allowed,
 		&result.RequestsToday,
 		&result.DailyLimit,
@@ -172,6 +174,8 @@ func (db *Database) InsertUsageTracking(ctx context.Context, data *UsageTracking
 		INSERT INTO "bedrock-proxy-usage-tracking-tbl" (
 			cognito_user_id,
 			cognito_email,
+			team,
+			person,
 			request_timestamp,
 			model_id,
 			source_ip,
@@ -185,12 +189,14 @@ func (db *Database) InsertUsageTracking(ctx context.Context, data *UsageTracking
 			processing_time_ms,
 			response_status,
 			error_message
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 	`
 	
 	_, err := db.pool.Exec(ctx, query,
 		data.CognitoUserID,
 		data.CognitoEmail,
+		data.Team,
+		data.Person,
 		data.RequestTimestamp,
 		data.ModelID,
 		data.SourceIP,

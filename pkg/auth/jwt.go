@@ -85,6 +85,21 @@ func ValidateToken(tokenString, secretKey string) (*JWTClaims, error) {
 	return nil, fmt.Errorf("invalid token")
 }
 
+// DecodeTokenUnsafe decodifica un JWT sin validar la firma
+// Útil para extraer información básica de tokens inválidos para tracking
+func DecodeTokenUnsafe(tokenString string) (*JWTClaims, error) {
+	token, _, err := jwt.NewParser().ParseUnverified(tokenString, &JWTClaims{})
+	if err != nil {
+		return nil, fmt.Errorf("error decoding token: %w", err)
+	}
+
+	if claims, ok := token.Claims.(*JWTClaims); ok {
+		return claims, nil
+	}
+
+	return nil, fmt.Errorf("invalid token claims")
+}
+
 // HashToken genera SHA256 hash del token para almacenar/buscar en BD
 func HashToken(tokenString string) string {
 	hash := sha256.Sum256([]byte(tokenString))

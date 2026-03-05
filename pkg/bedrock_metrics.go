@@ -48,6 +48,8 @@ func (this *BedrockClient) processMetrics(ctx context.Context, user *auth.UserCo
 	usageData := &database.UsageTrackingData{
 		CognitoUserID:       user.UserID,
 		CognitoEmail:        user.Email,
+		Team:                user.Team,   // Team from JWT token
+		Person:              user.Person, // Person from JWT token
 		RequestTimestamp:    startTime,
 		ModelID:             metric.ModelID,
 		SourceIP:            metric.SourceIP,
