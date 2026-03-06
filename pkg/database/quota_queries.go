@@ -52,13 +52,13 @@ type UsageTrackingData struct {
 
 // CheckAndUpdateQuota verifica la cuota del usuario e incrementa el contador
 // Esta es la función principal que debe llamarse en cada petición
-func (db *Database) CheckAndUpdateQuota(ctx context.Context, cognitoUserID, cognitoEmail, team string) (*QuotaCheckResult, error) {
-	query := `SELECT * FROM check_and_update_quota($1, $2, $3)`
+func (db *Database) CheckAndUpdateQuota(ctx context.Context, cognitoUserID, cognitoEmail, team, person string) (*QuotaCheckResult, error) {
+	query := `SELECT * FROM check_and_update_quota($1, $2, $3, $4)`
 	
 	var result QuotaCheckResult
 	var blockReason *string
 	
-	err := db.pool.QueryRow(ctx, query, cognitoUserID, cognitoEmail, team).Scan(
+	err := db.pool.QueryRow(ctx, query, cognitoUserID, cognitoEmail, team, person).Scan(
 		&result.Allowed,
 		&result.RequestsToday,
 		&result.DailyLimit,

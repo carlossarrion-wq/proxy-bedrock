@@ -186,8 +186,8 @@ func (am *AuthMiddleware) Middleware(next http.Handler) http.Handler {
 		am.rateLimiter.RecordSuccessfulAttempt(clientIP)
 
 		// 4. VERIFICACIÓN DE CUOTA DIARIA
-		// Verificar y actualizar la cuota del usuario (incluyendo team del JWT)
-		quotaResult, err := am.db.CheckAndUpdateQuota(r.Context(), claims.UserID, claims.Email, claims.Team)
+		// Verificar y actualizar la cuota del usuario (incluyendo team y person del JWT)
+		quotaResult, err := am.db.CheckAndUpdateQuota(r.Context(), claims.UserID, claims.Email, claims.Team, claims.Person)
 		if err != nil {
 			am.respondError(w, r, http.StatusInternalServerError, 
 				fmt.Sprintf("error checking quota: %v", err), "quota_check_error", tokenString)
