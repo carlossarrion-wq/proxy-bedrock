@@ -730,6 +730,24 @@ func convertAnthropicToBedrockMessages(anthropicMessages []interface{}, forcePro
 	return bedrockMessages, nil
 }
 
+// sendSSEError envía un error en formato SSE compatible con Anthropic
+func sendSSEError(w http.ResponseWriter, errorType, errorMessage string) {
+	errorEvent := map[string]interface{}{
+		"type": "error",
+		"error": map[string]interface{}{
+			"type":    errorType,
+			"message": errorMessage,
+		},
+	}
+	errorJSON, _ := json.Marshal(errorEvent)
+	fmt.Fprintf(w, "event: error\ndata: %s\n\n", string(errorJSON))
+	
+	// Forzar flush si el ResponseWriter lo soporta
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 func (this *BedrockClient) handleBedrockStreamConverse(w http.ResponseWriter, client *bedrockRuntime.Client, modelID string, systemBlocks []types.SystemContentBlock, messages []types.Message, maxTokens int32, toolConfig *types.ToolConfiguration, toolChoice types.ToolChoice) error {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -759,6 +777,9 @@ func (this *BedrockClient) handleBedrockStreamConverse(w http.ResponseWriter, cl
 	// Ejecutar streaming
 	output, err := client.ConverseStream(context.Background(), input)
 	if err != nil {
+		// Enviar error como evento SSE antes de retornar
+		errorMsg := fmt.Sprintf("failed to start converse stream: %v", err)
+		sendSSEError(w, "api_error", errorMsg)
 		return fmt.Errorf("failed to start converse stream: %w", err)
 	}
 
@@ -880,6 +901,9 @@ func (this *BedrockClient) handleBedrockStreamConverse(w http.ResponseWriter, cl
 
 	// Verificar errores del stream
 	if err := stream.Err(); err != nil {
+		// Enviar error como evento SSE en formato Anthropic
+		errorMsg := fmt.Sprintf("Bedrock stream error: %v", err)
+		sendSSEError(w, "api_error", errorMsg)
 		return fmt.Errorf("stream error: %w", err)
 	}
 
@@ -1103,27 +1127,48 @@ func (this *BedrockClient) HandleProxy(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 			
-			Logger.InfoContext(ctx, amslog.Event{
-				Name:    "BEDROCK_PARSE_SYSTEM",
-				Message: "Converted system blocks with cache support",
-				Fields: map[string]interface{}{
-					"system_blocks_count":   len(systemBlocks),
-					"tools_added":           toolsTextForSystemPrompt != "",
-					"force_prompt_caching":  this.config.ForcePromptCaching,
-				},
-			})
+		Logger.InfoContext(ctx, amslog.Event{
+			Name:    "BEDROCK_PARSE_SYSTEM",
+			Message: "Converted system blocks with cache support",
+			Fields: map[string]interface{}{
+				"system_blocks_count":   len(systemBlocks),
+				"tools_added":           toolsTextForSystemPrompt != "",
+				"force_prompt_caching":  this.config.ForcePromptCaching,
+			},
+		})
+	}
+	
+	// LOG DETALLADO: Volcar el contenido completo de los system blocks
+	if len(systemBlocks) > 0 {
+		for i, block := range systemBlocks {
+			if textBlock, ok := block.(*types.SystemContentBlockMemberText); ok {
+				Logger.InfoContext(ctx, amslog.Event{
+					Name:    "BEDROCK_SYSTEM_BLOCK_CONTENT",
+					Message: fmt.Sprintf("System block %d content", i),
+					Fields: map[string]interface{}{
+						"block_index":   i,
+						"content_length": len(textBlock.Value),
+						"content_preview": func() string {
+							if len(textBlock.Value) > 500 {
+								return textBlock.Value[:500] + "... (truncated)"
+							}
+							return textBlock.Value
+						}(),
+						"full_content": textBlock.Value, // Contenido completo para debugging
+					},
+				})
+			} else if _, ok := block.(*types.SystemContentBlockMemberCachePoint); ok {
+				Logger.InfoContext(ctx, amslog.Event{
+					Name:    "BEDROCK_SYSTEM_BLOCK_CONTENT",
+					Message: fmt.Sprintf("System block %d is cache point", i),
+					Fields: map[string]interface{}{
+						"block_index": i,
+						"block_type":  "cache_point",
+					},
+				})
+			}
 		}
-		
-		// LOG solo en modo DEBUG
-		if this.config.DEBUG && len(systemBlocks) > 0 {
-			Logger.DebugContext(ctx, amslog.Event{
-				Name:    "BEDROCK_SYSTEM_PROMPT_DETAIL",
-				Message: "System prompt content being sent to Bedrock",
-				Fields: map[string]interface{}{
-					"total_blocks": len(systemBlocks),
-				},
-			})
-		}
+	}
 		
 		// Extraer max_tokens (prioridad: config > payload > default)
 		maxTokens := int32(DefaultMaxTokens)
@@ -1256,6 +1301,9 @@ func (this *BedrockClient) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			if metricsCapture != nil {
 				metricsCapture.MarkError(err.Error())
 			}
+			
+			// IMPORTANTE: No retornar aquí, el error ya fue enviado como evento SSE
+			// El cliente (Cline) recibirá el evento de error y lo procesará
 		}
 		
 		endPhase()

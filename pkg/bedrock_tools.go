@@ -2,7 +2,6 @@ package pkg
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -156,17 +155,21 @@ func convertAnthropicToolChoiceToBedrock(toolChoice interface{}) types.ToolChoic
 	return nil
 }
 
-// convertAnthropicToolsToJSON convierte tools de formato Anthropic a formato JSON estructurado
-// para incluir en el system prompt (formato Bedrock nativo)
+// convertAnthropicToolsToJSON convierte tools de formato Anthropic a formato XML
+// compatible con Cline (que espera sintaxis XML para tool calls)
 func convertAnthropicToolsToJSON(anthropicTools []interface{}) (string, error) {
 	if len(anthropicTools) == 0 {
 		return "", nil
 	}
 
-	// Crear estructura para las herramientas
-	toolsData := make([]map[string]interface{}, 0, len(anthropicTools))
+	var result strings.Builder
+	result.WriteString("\n\n# Available MCP Tools\n\n")
+	result.WriteString("The following tools are available as MCP (Model Context Protocol) tools. ")
+	result.WriteString("Each tool has a name, description, and input schema that defines its parameters.\n\n")
+	result.WriteString("```json\n")
+	result.WriteString("[\n")
 	
-	for _, tool := range anthropicTools {
+	for i, tool := range anthropicTools {
 		toolMap, ok := tool.(map[string]interface{})
 		if !ok {
 			continue
@@ -180,30 +183,26 @@ func convertAnthropicToolsToJSON(anthropicTools []interface{}) (string, error) {
 			continue
 		}
 
-		// Crear entrada de herramienta con formato estructurado
-		toolEntry := map[string]interface{}{
-			"name":        name,
-			"description": description,
-			"inputSchema": inputSchema,
+		// Serializar cada tool como JSON
+		toolJSON := map[string]interface{}{
+			"name":         name,
+			"description":  description,
+			"input_schema": inputSchema,
 		}
 		
-		toolsData = append(toolsData, toolEntry)
+		toolBytes, err := json.MarshalIndent(toolJSON, "  ", "  ")
+		if err != nil {
+			continue
+		}
+		
+		if i > 0 {
+			result.WriteString(",\n")
+		}
+		result.WriteString("  ")
+		result.WriteString(string(toolBytes))
 	}
-
-	// Convertir a JSON
-	jsonBytes, err := json.MarshalIndent(toolsData, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal tools to JSON: %w", err)
-	}
-
-	// Crear el texto del system prompt con las herramientas en JSON
-	var result strings.Builder
-	result.WriteString("\n\n# Available MCP Tools\n\n")
-	result.WriteString("The following tools are available as MCP (Model Context Protocol) tools. ")
-	result.WriteString("Each tool has a name, description, and input schema that defines its parameters.\n\n")
-	result.WriteString("```json\n")
-	result.WriteString(string(jsonBytes))
-	result.WriteString("\n```\n\n")
+	
+	result.WriteString("\n]\n```\n\n")
 	result.WriteString("To use a tool, reference it by name and provide parameters according to its input schema.\n")
 
 	return result.String(), nil
