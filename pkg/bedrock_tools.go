@@ -203,7 +203,31 @@ func convertAnthropicToolsToJSON(anthropicTools []interface{}) (string, error) {
 	}
 	
 	result.WriteString("\n]\n```\n\n")
-	result.WriteString("To use a tool, reference it by name and provide parameters according to its input schema.\n")
+	result.WriteString("## How to Use Tools\n\n")
+	result.WriteString("To use a tool, you MUST use XML tags in this EXACT format:\n\n")
+	result.WriteString("<tool_name>\n")
+	result.WriteString("<parameter_name>parameter_value</parameter_name>\n")
+	result.WriteString("<parameter_name>parameter_value</parameter_name>\n")
+	result.WriteString("<task_progress>- [ ] Item 1\n- [ ] Item 2</task_progress>\n")
+	result.WriteString("</tool_name>\n\n")
+	result.WriteString("CRITICAL RULES:\n")
+	result.WriteString("1. Use the tool name as the opening and closing XML tag (e.g., <execute_command>, <read_file>)\n")
+	result.WriteString("2. Each parameter must be wrapped in its own XML tag with the parameter name\n")
+	result.WriteString("3. The task_progress parameter is REQUIRED and must be included as a separate XML tag\n")
+	result.WriteString("4. Do NOT use <invoke>, <function_calls>, <tool_use>, or any wrapper tags\n")
+	result.WriteString("5. Do NOT use JSON format - only XML tags are accepted\n\n")
+	result.WriteString("Example of CORRECT tool usage:\n")
+	result.WriteString("<execute_command>\n")
+	result.WriteString("<command>curl -L https://example.com</command>\n")
+	result.WriteString("<requires_approval>false</requires_approval>\n")
+	result.WriteString("<task_progress>- [ ] Fetch webpage\n- [ ] Analyze content</task_progress>\n")
+	result.WriteString("</execute_command>\n\n")
+	result.WriteString("Example of INCORRECT tool usage (DO NOT DO THIS):\n")
+	result.WriteString("<invoke name=\"read_file\">\n")
+	result.WriteString("<parameter name=\"path\">file.txt</parameter>\n")
+	result.WriteString("<parameter name=\"task_progress\">- [ ] Read file</parameter>\n")
+	result.WriteString("</invoke>\n\n")
+	result.WriteString("Remember: Use the tool name directly as the XML tag, with each parameter as a nested XML tag.\n")
 
 	return result.String(), nil
 }
